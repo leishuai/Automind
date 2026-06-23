@@ -228,9 +228,22 @@ def automation_setup_command_plan(target: str) -> dict:
 
 
 def classify_setup_failure(log_text: str) -> dict:
-    """Classify common helper setup failures into actionable diagnostics."""
+    """Classify common helper setup failures into actionable diagnostics.
+
+    Model-first triage: each return carries ``triageSource`` /
+    ``needsModelReview``. Recognized DNS/permission/package-resolution patterns
+    are ``code_deterministic``; the catch-all ``unknown`` fallback is
+    ``requires_model_review`` so the caller reads the real step log instead of
+    trusting a blind default.
+    """
     lower = (log_text or "").lower()
-    diagnostics: dict = {"category": "unknown", "summary": "Setup failed; inspect step logs for details.", "suggestions": []}
+    diagnostics: dict = {
+        "category": "unknown",
+        "summary": "Setup failed; inspect step logs for details.",
+        "suggestions": [],
+        "triageSource": "requires_model_review",
+        "needsModelReview": True,
+    }
     if "failed to resolve" in lower or "nameresolutionerror" in lower or "temporary failure in name resolution" in lower or "could not resolve host" in lower:
         diagnostics.update({
             "category": "network_or_dns",
@@ -242,6 +255,8 @@ def classify_setup_failure(log_text: str) -> dict:
                 "If a runtime AutoMind .venv-android-tools is already ready, let preflight reuse it instead of reinstalling project-local helpers.",
                 "For Android verification only, consider an explicit adb-only fallback if lower capability is acceptable.",
             ],
+            "triageSource": "code_deterministic",
+            "needsModelReview": False,
         })
     elif "permission denied" in lower or "not writable" in lower:
         diagnostics.update({
@@ -251,6 +266,8 @@ def classify_setup_failure(log_text: str) -> dict:
                 "Use a writable workspace and pip cache, or set PIP_CACHE_DIR to a writable path.",
                 "Do not use sudo for AutoMind helper venvs; they are project-local user-space environments.",
             ],
+            "triageSource": "code_deterministic",
+            "needsModelReview": False,
         })
     elif "no matching distribution found" in lower or "could not find a version that satisfies" in lower:
         diagnostics.update({
@@ -260,6 +277,8 @@ def classify_setup_failure(log_text: str) -> dict:
                 "Check Python version compatibility and package index availability.",
                 "Use a known-good runtime helper venv or approved mirror/wheelhouse.",
             ],
+            "triageSource": "code_deterministic",
+            "needsModelReview": False,
         })
     return diagnostics
 

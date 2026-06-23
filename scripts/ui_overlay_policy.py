@@ -426,7 +426,24 @@ def evaluate_overlay_rules(values: list[str], policy: dict[str, Any] | None = No
 
 
 def classify_overlay_candidate(element: dict[str, Any], policy: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Classify one UI element as a safe, sensitive, or unknown unblock target."""
+    """Classify one UI element as a safe, sensitive, or unknown unblock target.
+
+    Model-first triage contract: this classifier is intentionally conservative
+    and marks every non-deterministic decision so callers can route them to
+    model review. Use the returned `triageSource` field to drive triage:
+
+    * `code_deterministic` — well-understood keyword patterns that are
+      overwhelmingly safe or overwhelmingly sensitive (and safe to block).
+    * `code_heuristic_blocked` — a heuristic that rejected a button / dialog
+      element because its text looked like a sensitive action but the call
+      site has an allow list that overrides it.
+    * `requires_model_review` — the classifier could not make a confident
+      decision; callers should surface the element's text / hierarchy to a
+      model or a human before acting on it.
+
+    The returned boolean `needsModelReview` is a convenience — True whenever
+    `triageSource == "requires_model_review"`.
+    """
     values = text_values(element)
 
     enabled = not (str(element.get("enabled", "")).strip().casefold() == "false" or element.get("enabled") is False)
@@ -440,6 +457,8 @@ def classify_overlay_candidate(element: dict[str, Any], policy: dict[str, Any] |
             "reason": "element is disabled, not clickable, or has no center point",
             "texts": values,
             "matchedKeywords": [],
+            "triageSource": "code_deterministic",
+            "needsModelReview": False,
         }
 
     allow_positive_consent = bool(policy and policy.get("allowPositiveConsent"))
@@ -457,6 +476,8 @@ def classify_overlay_candidate(element: dict[str, Any], policy: dict[str, Any] |
                     "texts": values,
                     "matchedKeywords": image_close_matches,
                     "ruleDecision": "contextual_allow",
+                    "triageSource": "code_deterministic",
+                    "needsModelReview": False,
                 }
             return {
                 "allowed": True,
@@ -465,6 +486,8 @@ def classify_overlay_candidate(element: dict[str, Any], policy: dict[str, Any] |
                 "texts": values,
                 "matchedKeywords": rule_result.get("matchedKeywords") or [],
                 "ruleDecision": decision,
+                "triageSource": "code_deterministic",
+                "needsModelReview": False,
             }
         if decision == "requires_authorization" and category == "positive_privacy_or_terms_consent" and allow_positive_consent:
             return {
@@ -474,6 +497,8 @@ def classify_overlay_candidate(element: dict[str, Any], policy: dict[str, Any] |
                 "texts": values,
                 "matchedKeywords": rule_result.get("matchedKeywords") or [],
                 "ruleDecision": decision,
+                "triageSource": "code_deterministic",
+                "needsModelReview": False,
             }
         return {
             "allowed": False,
@@ -483,6 +508,8 @@ def classify_overlay_candidate(element: dict[str, Any], policy: dict[str, Any] |
             "texts": values,
             "matchedKeywords": rule_result.get("matchedKeywords") or [],
             "ruleDecision": decision,
+            "triageSource": "code_heuristic_blocked" if decision in {"deny", "requires_authorization"} else "requires_model_review",
+            "needsModelReview": decision not in {"deny", "requires_authorization"},
         }
     sensitive_context = _has_sensitive_context(values, policy)
     if sensitive_context:
@@ -492,6 +519,8 @@ def classify_overlay_candidate(element: dict[str, Any], policy: dict[str, Any] |
             **sensitive_context,
             "texts": values,
             "ruleDecision": "deny",
+            "triageSource": "code_heuristic_blocked",
+            "needsModelReview": False,
         }
     generic_confirm_matches = _keyword_matches(values, GENERIC_CONFIRM_KEYWORDS)
     if generic_confirm_matches:
@@ -502,6 +531,8 @@ def classify_overlay_candidate(element: dict[str, Any], policy: dict[str, Any] |
             "texts": values,
             "matchedKeywords": generic_confirm_matches,
             "ruleDecision": "contextual_allow",
+            "triageSource": "code_deterministic",
+            "needsModelReview": False,
         }
     image_close_matches = _keyword_matches(values, IMAGE_CLOSE_KEYWORDS)
     if image_close_matches and _looks_like_image_close_button(element, values):
@@ -512,13 +543,17 @@ def classify_overlay_candidate(element: dict[str, Any], policy: dict[str, Any] |
             "texts": values,
             "matchedKeywords": image_close_matches,
             "ruleDecision": "contextual_allow",
+            "triageSource": "code_deterministic",
+            "needsModelReview": False,
         }
     return {
         "allowed": False,
-        "category": "unknown",
-        "reason": "no safe dismiss keyword matched",
+        "category": "requires_model_review",
+        "reason": "no safe dismiss keyword matched — surface this element's text / hierarchy to a model or a human before clicking",
         "texts": values,
         "matchedKeywords": [],
+        "triageSource": "requires_model_review",
+        "needsModelReview": True,
     }
 
 

@@ -287,6 +287,17 @@ def main() -> int:
             err = exc.stderr if isinstance(exc.stderr, str) else ""
             full_settings_text = out + "\n" + err
             settings_run = {"command": cmd, "exitCode": 124, "timeout": True, "stdoutTail": out[-12000:], "stderrTail": err[-12000:]}
+        # Persist the complete (untruncated) build-settings output next to the
+        # JSON so the evaluator can read the real values even when they fall
+        # outside the 12000 char stdoutTail/stderrTail kept in this JSON.
+        out_dir = pathlib.Path(args.out).expanduser().resolve().parent
+        full_log = out_dir / "ios-project-probe-build-settings.log"
+        try:
+            full_log.parent.mkdir(parents=True, exist_ok=True)
+            full_log.write_text(full_settings_text, errors="ignore")
+            settings_run["fullBuildSettingsLog"] = rel(root, full_log) if str(full_log).startswith(str(root.resolve())) else str(full_log)
+        except Exception:
+            settings_run["fullBuildSettingsLog"] = ""
         result["showBuildSettingsRun"] = settings_run
         result["buildSettings"] = extract_build_settings(full_settings_text)
         result["issues"].extend(classify_settings(result["buildSettings"]))

@@ -116,3 +116,74 @@ def test_iteration_purpose_md_no_warning_when_narrowing(tmp_path: Path) -> None:
     assert item["narrowingRounds"] >= 1
     md = (iter_dir / "iteration-purpose.md").read_text()
     assert "WARNING" not in md
+
+
+def test_iteration_purpose_md_renders_recovery_action_from_failed_checks(tmp_path: Path) -> None:
+    """When evaluator classifies a failure with a concrete recovery action
+    (e.g. 'run pod install'), that action must be reachable through the
+    iteration-purpose.md text so Generator picks it up instead of retrying
+    the same failing command blindly."""
+    task = tmp_path / "task01"
+    _base_task(task)
+    record_tc_attempts(task, {
+        "iteration": 31,
+        "result": "fail",
+        "nextAction": "retry_generator",
+        "testResults": [{"testCaseId": "TC-F04", "result": "fail", "summary": "Build failed."}],
+        "failedChecks": [{
+            "testCaseIds": ["TC-F04"],
+            "category": "dependency_missing",
+            "recoveryAction": "Run `pod install` at the workspace root.",
+            "sameProblemKey": "ios.build.pod.SSUGCoinWidget_missing",
+            "specificErrors": ["unable to find module dependency: 'SSUGCoinWidget'"],
+        }],
+    })
+    iter_dir = task / "logs" / "iter-32"
+
+    write_iteration_purpose(task, 32, "generator", iter_dir)
+
+    item = purpose = None  # placeholder to avoid py-level unused var
+    md = (iter_dir / "iteration-purpose.md").read_text()
+    assert "failure triage" in md
+    assert "dependency_missing" in md
+    assert "Run `pod install`" in md
+    assert "sameProblemKeys" in md
+    assert "unable to find module dependency" in md
+
+
+def test_iteration_purpose_md_suppresses_warning_when_recovery_provided(tmp_path: Path) -> None:
+    """When failedChecks[] already proposed a concrete recovery action, the
+    invalid-retry WARNING should be suppressed — the triage succeeded, and
+    the next iteration should just execute that recovery action."""
+    task = tmp_path / "task01"
+    _base_task(task)
+    # Two failing rounds, neither ruled anything out (narrowingRounds stays 0),
+    # but the second round DID propose a concrete recovery action.
+    record_tc_attempts(task, {
+        "iteration": 30,
+        "result": "fail",
+        "nextAction": "retry_generator",
+        "testResults": [{"testCaseId": "TC-F04", "result": "fail", "summary": "Build failed."}],
+        "failedChecks": [{"testCaseIds": ["TC-F04"], "category": "build_failure", "summary": "Build failed."}],
+    })
+    record_tc_attempts(task, {
+        "iteration": 31,
+        "result": "fail",
+        "nextAction": "retry_generator",
+        "testResults": [{"testCaseId": "TC-F04", "result": "fail", "summary": "Build failed."}],
+        "failedChecks": [{
+            "testCaseIds": ["TC-F04"],
+            "category": "dependency_missing",
+            "recoveryAction": "Run `pod install` at the workspace root.",
+        }],
+    })
+    iter_dir = task / "logs" / "iter-32"
+
+    write_iteration_purpose(task, 32, "generator", iter_dir)
+
+    md = (iter_dir / "iteration-purpose.md").read_text()
+    assert "Run `pod install`" in md
+    # With hasSpecificRecovery=True, the "invalid retry pattern" WARNING is
+    # suppressed: triage has succeeded, the next iteration just needs to
+    # execute the recovery action.
+    assert "invalid retry pattern" not in md

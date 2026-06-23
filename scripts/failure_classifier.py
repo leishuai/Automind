@@ -23,6 +23,15 @@ class Classification:
     sameProblemKey: str
     retryableBy: str = "agent"
     askUserQuestion: dict[str, Any] | None = None
+    specificErrors: list[str] | None = None
+    recoveryAction: str | None = None
+    triageSource: str = "code_fast_path"  # "code_fast_path" (deterministic pattern matched) | "model_triage" | "unclassified"
+    needsModelReview: bool = False  # derived: True when triageSource is not a confident code_fast_path match
+
+    def __post_init__(self) -> None:
+        # Keep needsModelReview consistent with triageSource: only a confident
+        # deterministic fast-path match is trusted without model review.
+        self.needsModelReview = self.triageSource != "code_fast_path"
 
 
 def _ask(question: str, reason: str, options: list[dict[str, Any]], recommended: str = "A", category: str | None = None) -> dict[str, Any]:
@@ -99,7 +108,9 @@ def classify(platform: str, phase: str, log: str, exit_code: int | None = None, 
             ),
         )
 
-    if "requires a development team" in text or "no profiles for" in text or "provisioning profile" in text and "error" in text:
+    if "requires a development team" in text or "no profiles for" in text or (
+        "provisioning profile" in text and ("error" in text or "required" in text or "doesn't include" in text or "not found" in text or "code signing" in text)
+    ) or "code signing is required" in text or "requires signing" in text:
         # First try to self-heal with signing material that already exists in the
         # project / on this machine (an existing DEVELOPMENT_TEAM, a codesigning
         # identity in the keychain, or a bundled `.mobileprovision`). Only escalate
@@ -130,6 +141,7 @@ def classify(platform: str, phase: str, log: str, exit_code: int | None = None, 
                 "retry_generator",
                 "ios.signing.team_or_profile.use_existing",
                 "agent",
+                recoveryAction="Reuse signing material in project/machine: run `automind ios-signing-preflight <task> --discover --bundle-id <bundle>` to obtain signingPlan, then rebuild.",
             )
         return Classification(
             "permission_blocked",
@@ -477,18 +489,86 @@ def classify(platform: str, phase: str, log: str, exit_code: int | None = None, 
             "verifier",
         )
 
-    # Generic fallback by phase/exit code
+    # Explicitly unclassified: the code patterns above did not match. Return a
+    # classification that tells the calling harness: "let the model read the
+    # raw log and do the triage." The evaluator MUST then follow the Failure
+    # Triage Protocol in evaluator_prompt.md to extract specificErrors, pick a
+    # fine-grained category (dependency_missing / tooling_version_mismatch /
+    # product_code_error / ...), propose a recoveryAction, and set a stable
+    # sameProblemKey so the next round converges instead of looping.
     if ph == "build" or "build failed" in text:
-        return Classification("build_failure", "Build failed.", "retry_generator", f"{p}.build.failure")
+        return Classification(
+            "unknown",
+            "Build failed but no deterministic code-pattern matched. "
+            "The evaluator MUST follow the Failure Triage Protocol to read the "
+            "raw build log, extract specificErrors, and classify into a "
+            "fine-grained category (dependency_missing / tooling_version_mismatch / "
+            "product_code_error / signing_or_provisioning / "
+            "device_unavailable_or_untrusted / resource_exhausted_or_permissions / "
+            "network_or_external_service / flaky_or_timeout). Do not stop here "
+            "with a generic 'build_failure' — the sameProblemKey must be specific "
+            "enough to break the loop.",
+            "retry_generator",
+            f"{p}.build.unclassified_triage_needed",
+            "agent",
+            specificErrors=[],
+            recoveryAction="triage_needed",
+            triageSource="unclassified",
+        )
     if ph == "install":
-        return Classification("install_failure", "Install failed.", "retry_generator", f"{p}.install.failure")
+        return Classification(
+            "install_failure",
+            "App installation failed; no code pattern matched. The evaluator MUST triage the raw install log following the Failure Triage Protocol.",
+            "retry_generator",
+            f"{p}.install.unclassified_triage_needed",
+            "agent",
+            specificErrors=[],
+            recoveryAction="triage_needed",
+            triageSource="unclassified",
+        )
     if ph == "launch":
-        return Classification("launch_failure", "Launch failed.", "retry_generator", f"{p}.launch.failure")
+        return Classification(
+            "launch_failure",
+            "App launch failed; no code pattern matched. The evaluator MUST triage the raw launch log following the Failure Triage Protocol.",
+            "retry_generator",
+            f"{p}.launch.unclassified_triage_needed",
+            "agent",
+            specificErrors=[],
+            recoveryAction="triage_needed",
+            triageSource="unclassified",
+        )
     if ph == "test" or "test failed" in text or "assert" in text:
-        return Classification("test_failure", "Test failed.", "retry_generator", f"{p}.test.failure")
+        return Classification(
+            "test_failure",
+            "Test failure not matched by code patterns. The evaluator MUST triage following the Failure Triage Protocol (was it product_code_error, test_fixture_or_harness_bug, flaky_or_timeout?).",
+            "retry_generator",
+            f"{p}.test.unclassified_triage_needed",
+            "agent",
+            specificErrors=[],
+            recoveryAction="triage_needed",
+            triageSource="unclassified",
+        )
     if exit_code and exit_code != 0:
-        return Classification("unknown", f"Command exited with code {exit_code}.", "retry_generator", f"{p}.{ph}.exit_{exit_code}")
-    return Classification("unknown", "Unable to classify failure from current evidence.", "replan", f"{p}.{ph}.unknown", "human")
+        return Classification(
+            "unknown",
+            f"Command exited with code {exit_code} but no deterministic pattern matched — the evaluator MUST triage the raw output following the Failure Triage Protocol.",
+            "retry_generator",
+            f"{p}.{ph}.exit_{exit_code}_triage_needed",
+            "agent",
+            specificErrors=[],
+            recoveryAction="triage_needed",
+            triageSource="unclassified",
+        )
+    return Classification(
+        "unknown",
+        "Unable to classify failure from current evidence.",
+        "replan",
+        f"{p}.{ph}.unknown_triage_needed",
+        "human",
+        specificErrors=[],
+        recoveryAction="triage_needed",
+        triageSource="unclassified",
+    )
 
 
 def main() -> int:

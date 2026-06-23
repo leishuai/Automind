@@ -114,3 +114,47 @@ def test_policy_supports_task_local_rules_without_code_changes() -> None:
     assert result["allowed"] is True
     assert result["category"] == "safe_dismiss"
     assert evaluate_overlay_rules(["Remind me later"], policy)["decision"] == "allow"
+
+
+def test_every_classification_has_triage_source_and_needs_model_review_flags() -> None:
+    """Every result from classify_overlay_candidate must expose the
+    triageSource + needsModelReview fields so callers can route uncertain
+    decisions to a model for a second look."""
+    # (label, element, policy, expected_source, expected_needs_review)
+    cases = [
+        ("safe dismiss", _element("Not now"), None, "code_deterministic", False),
+        ("safe confirm", _element("OK"), None, "code_deterministic", False),
+        ("sign-in sensitive", _element("Sign in with Google"), None,
+         "code_heuristic_blocked", False),
+        ("sensitive with deny context", _element("确定"), {"contextTexts": ["删除当前账号？"]},
+         "code_heuristic_blocked", False),
+    ]
+    for label, element, policy, expected_source, expected_needs_review in cases:
+        result = classify_overlay_candidate(element, policy)
+        assert "triageSource" in result, label
+        assert "needsModelReview" in result, label
+        assert result["triageSource"] == expected_source, f"{label}: {result['triageSource']}"
+        assert result["needsModelReview"] == expected_needs_review, label
+
+
+def test_unknown_elements_route_to_model_review_rather_than_silent_deny() -> None:
+    """Elements we cannot classify must surface a clear "ask a model"
+    signal, instead of silently returning category='unknown'."""
+    for label in ["Enable notifications for cool app", "Join the waitlist", "Rate this app", ""]:
+        result = classify_overlay_candidate(_element(label))
+        assert result["allowed"] is False, label
+        assert result["category"] == "requires_model_review", f"{label}: got {result['category']}"
+        assert result["triageSource"] == "requires_model_review"
+        assert result["needsModelReview"] is True
+        assert "model" in result["reason"] or "human" in result["reason"]
+
+
+def test_disabled_elements_are_code_deterministic_and_do_not_need_model_review() -> None:
+    element = _element("Next")
+    element["enabled"] = False
+    result = classify_overlay_candidate(element)
+    assert result["allowed"] is False
+    assert result["triageSource"] == "code_deterministic"
+    assert result["needsModelReview"] is False
+
+

@@ -39,23 +39,85 @@ def run_ocr(image: Path, log_dir: Path) -> tuple[str, dict[str, Any]]:
     return text, {"lang": lang, "exitCode": proc.returncode, "textPath": str(text_path)}
 
 
-def classify(text: str) -> tuple[str, str, list[str]]:
+def classify_detail(text: str) -> dict[str, Any]:
+    """Return rich triage information about the iOS OCR readiness analysis.
+
+    This is the model-first variant:
+    - Well-understood OCR signals (privacy consent prompts, OS permission
+      dialogs, login screens, in-progress loaders) are code-classified
+      (`triageSource = "code_deterministic"`).
+    - When OCR has text but no known keyword is matched, return
+      `triageSource = "requires_model_review"` so the Evaluator can inspect
+      the real OCR text before deciding whether the screen is ready.
+    - When OCR is empty the screen may be empty, white, or OCR may have
+      failed; we surface this as `triageSource = "code_deterministic"` with
+      `result = "blocked"` because we cannot positively rule in a ready
+      state from an empty scan.
+    """
     hits: list[str] = []
     for category, keys in BLOCKERS.items():
         matched = [k for k in keys if k.lower() in text.lower()]
         if matched:
             hits.extend(matched)
             if category == "privacy_consent_blocked":
-                return "blocked", category, hits
+                return {
+                    "result": "blocked",
+                    "category": category,
+                    "matchedKeywords": hits,
+                    "triageSource": "code_deterministic",
+                    "needsModelReview": False,
+                }
             if category == "permission_blocked":
-                return "blocked", category, hits
+                return {
+                    "result": "blocked",
+                    "category": category,
+                    "matchedKeywords": hits,
+                    "triageSource": "code_deterministic",
+                    "needsModelReview": False,
+                }
             if category == "login_state_blocked":
-                return "blocked", category, hits
+                return {
+                    "result": "blocked",
+                    "category": category,
+                    "matchedKeywords": hits,
+                    "triageSource": "code_deterministic",
+                    "needsModelReview": False,
+                }
             if category == "loading_state":
-                return "in_progress", category, hits
+                return {
+                    "result": "in_progress",
+                    "category": category,
+                    "matchedKeywords": hits,
+                    "triageSource": "code_deterministic",
+                    "needsModelReview": False,
+                }
     if text.strip():
-        return "pass", "no_common_blocker_detected", []
-    return "blocked", "ocr_no_text", []
+        return {
+            "result": "pass",
+            "category": "no_common_blocker_detected_requires_model_review",
+            "matchedKeywords": [],
+            "triageSource": "requires_model_review",
+            "needsModelReview": True,
+        }
+    return {
+        "result": "blocked",
+        "category": "ocr_no_text",
+        "matchedKeywords": [],
+        "triageSource": "code_deterministic",
+        "needsModelReview": False,
+    }
+
+
+def classify(text: str) -> tuple[str, str, list[str]]:
+    """Legacy 3-tuple wrapper kept for external callers.
+
+    Returns (result, category, matchedKeywords). New callers inside
+    AutoMind should use `classify_detail` instead and honor the
+    triageSource / needsModelReview fields before treating a screen as
+    "ready" or "blocked".
+    """
+    detail = classify_detail(text)
+    return detail["result"], detail["category"], detail["matchedKeywords"]
 
 
 def main() -> int:
@@ -84,9 +146,19 @@ def main() -> int:
     if not image.exists():
         text, ocr_meta = "", {"error": f"image not found: {image}"}
         result, category, hits = "blocked", "missing_screenshot", []
+        detail_triage = {"triageSource": "code_deterministic", "needsModelReview": False}
     else:
         text, ocr_meta = run_ocr(image, log_dir)
         result, category, hits = classify(text)
+        # Load rich triage information from classify_detail; safe to call
+        # twice because it is pure keyword logic, and existing tests
+        # monkeypatch classify directly so this fallback keeps behaviour.
+        detail_triage = {"triageSource": "code_deterministic", "needsModelReview": False}
+        try:
+            detail = classify_detail(text)
+            detail_triage = {"triageSource": detail.get("triageSource", "code_deterministic"), "needsModelReview": detail.get("needsModelReview", False)}
+        except Exception:
+            pass
 
     if category == "privacy_consent_blocked":
         summary = "Readiness blocked by privacy/terms consent screen; explicit authorization is required before tapping Agree/Allow/Continue."
@@ -106,6 +178,8 @@ def main() -> int:
         }
     elif result == "pass":
         summary = "No common OCR blocker detected; screenshot appears ready for the next task-specific assertions."
+        if detail_triage.get("needsModelReview"):
+            summary += " Note: OCR text did not match a known blocker pattern — the Evaluator should independently inspect the OCR excerpt before declaring readiness."
         ask = None
         auto_unblock = None
     else:
@@ -123,6 +197,8 @@ def main() -> int:
         "ocr": ocr_meta,
         "matchedKeywords": hits,
         "textExcerpt": text[:2000],
+        "triageSource": detail_triage.get("triageSource", "code_deterministic"),
+        "needsModelReview": detail_triage.get("needsModelReview", False),
         "askUserQuestion": ask,
         "autoUnblock": auto_unblock,
     }
@@ -131,16 +207,16 @@ def main() -> int:
     (log_dir / "evaluator.log").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     (log_dir / "env.json").write_text(json.dumps({"timestamp": datetime.now().isoformat(timespec="seconds"), "taskCode": args.task_code, "image": str(image), "bundleId": args.bundle_id}, ensure_ascii=False, indent=2) + "\n")
     (log_dir / "commands.md").write_text(f"# Commands\n\n```bash\n./automind.sh ios-readiness-analyze {args.task_code} --image {args.image} --bundle-id {args.bundle_id}\n```\n")
-    failed = [] if result == "pass" else [{"name": "readiness", "category": category, "reason": summary, "evidence": f"logs/iter-{args.iteration}/ios-readiness-summary.json"}]
+    failed = [] if result == "pass" else [{"name": "readiness", "category": category, "reason": summary, "evidence": f"logs/iter-{args.iteration}/ios-readiness-summary.json", "triageSource": detail_triage.get("triageSource", "code_deterministic"), "needsModelReview": detail_triage.get("needsModelReview", False)}]
     next_action = "finish" if result == "pass" else ("retry_generator" if auto_unblock else "ask_user")
     if ask:
         next_action = "ask_user"
-    evaluation = {"iteration": args.iteration, "result": result, "nextAction": next_action, "summary": summary, "failedChecks": failed, "evidence": [{"type":"other", "note":"ocr", "path": f"logs/iter-{args.iteration}/ocr.txt"}, {"type":"other", "note":"readiness-summary", "path": f"logs/iter-{args.iteration}/ios-readiness-summary.json"}], "autoUnblock": auto_unblock}
+    evaluation = {"iteration": args.iteration, "result": result, "nextAction": next_action, "summary": summary, "failedChecks": failed, "evidence": [{"type":"other", "note":"ocr", "path": f"logs/iter-{args.iteration}/ocr.txt"}, {"type":"other", "note":"readiness-summary", "path": f"logs/iter-{args.iteration}/ios-readiness-summary.json"}], "autoUnblock": auto_unblock, "triageSource": detail_triage.get("triageSource", "code_deterministic"), "needsModelReview": detail_triage.get("needsModelReview", False)}
     if ask:
         evaluation["askUserQuestion"] = ask
     (task_dir / "evaluation.json").write_text(json.dumps(evaluation, ensure_ascii=False, indent=2) + "\n")
     write_runtime_state(task_dir, {"taskId": args.task_code, "taskType": "ios", "status": "finished" if result == "pass" else ("human_input_pending" if evaluation["nextAction"] == "ask_user" else "blocked"), "iteration": args.iteration, "nextAction": evaluation["nextAction"], "updatedAt": datetime.now().isoformat(timespec="seconds")})
-    (task_dir / "Validation.md").open("a").write(f"\n## Iteration {args.iteration} - iOS readiness analyzer\n\n- Environment: image={image}; bundleId={args.bundle_id}\n- Commands: see `logs/iter-{args.iteration}/commands.md`\n- Result: {result.upper()}\n- Category: `{category}`\n- Summary: {summary}\n- Evidence: `logs/iter-{args.iteration}/ocr.txt`, `ios-readiness-summary.json`\n- Reusable findings: Screenshot/OCR can identify privacy, permission, login-state, and other readiness blockers; safe close/skip/later/dismiss overlays may auto-unblock, while privacy/terms agree/allow, reject/deny/login/payment/delete/external-upload/account-grant actions require explicit authorization or ask_user.\n- Avoid repeating: Do not treat privacy consent blockers as target-screen failure; route consent to explicit authorization/ask_user and use auto-unblock only for safe dismiss overlays.\n")
+    (task_dir / "Validation.md").open("a").write(f"\n## Iteration {args.iteration} - iOS readiness analyzer\n\n- Environment: image={image}; bundleId={args.bundle_id}\n- Commands: see `logs/iter-{args.iteration}/commands.md`\n- Result: {result.upper()}\n- Category: `{category}`\n- Triage source: `{detail_triage.get('triageSource', 'code_deterministic')}` (needsModelReview={detail_triage.get('needsModelReview', False)})\n- Summary: {summary}\n- Evidence: `logs/iter-{args.iteration}/ocr.txt`, `ios-readiness-summary.json`\n- Reusable findings: Screenshot/OCR can identify privacy, permission, login-state, and other readiness blockers; safe close/skip/later/dismiss overlays may auto-unblock, while privacy/terms agree/allow, reject/deny/login/payment/delete/external-upload/account-grant actions require explicit authorization or ask_user.\n- Avoid repeating: Do not treat privacy consent blockers as target-screen failure; route consent to explicit authorization/ask_user and use auto-unblock only for safe dismiss overlays. When the OCR classifier returns `needsModelReview=True`, the Evaluator must re-read the OCR excerpt and the screenshot before deciding the screen is ready — the code classifier did not recognize the page content.\n")
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if result == "pass" else 2
 

@@ -88,6 +88,46 @@ def test_android_probe_summary_classifies_install_signature_conflict_as_blocked(
     assert "different signature" in evaluation["failedChecks"][0]["reason"]
 
 
+def test_android_probe_summary_surfaces_triage_for_deterministic_failure() -> None:
+    """A failure with a known signature is code_deterministic and must not be
+    flagged for model review."""
+    main = _load_main()
+    evaluation = main.probe_summary_to_evaluation({
+        "result": "fail",
+        "checks": [{
+            "name": "install apk",
+            "ok": False,
+            "detail": "AdbInstallError('INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match previously installed version')",
+        }],
+        "stepResults": [],
+    }, 2, Path("logs/iter-2/probe-flow/probe-flow-summary.json"))
+    check = evaluation["failedChecks"][0]
+    assert check["category"] == "environment_blocked"
+    assert check["triageSource"] == "code_deterministic"
+    assert check["needsModelReview"] is False
+
+
+def test_android_probe_summary_flags_fallback_failure_for_model_review() -> None:
+    """An unrecognized failure falls back to validation_failure and must carry
+    needsModelReview=True so the isolated Evaluator re-examines rawReason
+    instead of trusting the generic product-defect default."""
+    main = _load_main()
+    evaluation = main.probe_summary_to_evaluation({
+        "result": "fail",
+        "checks": [{
+            "name": "tap play button",
+            "ok": False,
+            "detail": "some unrecognized probe step error that matches no known signature",
+        }],
+        "stepResults": [],
+    }, 3, Path("logs/iter-3/probe-flow/probe-flow-summary.json"))
+    check = evaluation["failedChecks"][0]
+    assert check["category"] == "validation_failure"
+    assert check["triageSource"] == "requires_model_review"
+    assert check["needsModelReview"] is True
+    assert check["rawReason"] == "some unrecognized probe step error that matches no known signature"
+
+
 def test_android_probe_summary_pass_with_missing_strong_post_check_becomes_partial() -> None:
     main = _load_main()
     evaluation = main.probe_summary_to_evaluation({

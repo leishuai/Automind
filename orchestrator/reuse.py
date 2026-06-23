@@ -25,13 +25,51 @@ from orchestrator.knowledge_index import ensure_phase_reuse_contexts, render_reu
 
 
 
-def detect_preferred_language(text: object) -> str:
+def detect_preferred_language_detail(text: object) -> dict:
+    """Rich model-first variant: detect the user's preferred language with triage.
+
+    Returns a dict with:
+      language: "zh" | "en" — the thin-wrapper return value.
+      triageSource: "code_deterministic" when the CJK character count is large
+          enough that the script is unambiguously Chinese, or when there are no
+          CJK characters at all. "requires_model_review" for short or mixed
+          inputs near the threshold where character counting is unreliable.
+      needsModelReview: True iff the result rests on a borderline heuristic.
+      reason: short human-readable description.
+    """
     value = str(text or "")
     cjk = sum(1 for ch in value if "\u4e00" <= ch <= "\u9fff")
     latin = sum(1 for ch in value if ("a" <= ch.lower() <= "z"))
-    if cjk >= 4 and cjk >= latin * 0.15:
-        return "zh"
-    return "en"
+    is_zh = cjk >= 4 and cjk >= latin * 0.15
+    language = "zh" if is_zh else "en"
+    # Confident zones: clearly Chinese-heavy, or no CJK at all.
+    if cjk == 0:
+        return {
+            "language": "en", "triageSource": "code_deterministic",
+            "needsModelReview": False,
+            "reason": "没有任何 CJK 字符，确定为英文/语言中立。",
+        }
+    if cjk >= 8 and cjk >= latin:
+        return {
+            "language": "zh", "triageSource": "code_deterministic",
+            "needsModelReview": False,
+            "reason": f"CJK 字符数 {cjk} 明显占主导，确定为中文。",
+        }
+    return {
+        "language": language, "triageSource": "requires_model_review",
+        "needsModelReview": True,
+        "reason": (
+            f"CJK={cjk} / latin={latin} 处于阈值边界（短文本/中英混合/以代码片段为主），"
+            "字符计数判定语言不可靠，模型应结合实际语境确认沟通语言。"
+        ),
+    }
+
+
+def detect_preferred_language(text: object) -> str:
+    """Detect the user's preferred communication language. Thin wrapper over
+    detect_preferred_language_detail; callers needing triage metadata should
+    use the _detail variant."""
+    return detect_preferred_language_detail(text)["language"]
 
 
 def runtime_language_instruction(user_input: object) -> str:

@@ -41,6 +41,7 @@ def _write_common_task(task_dir: Path) -> None:
     (iter_dir / "env.json").write_text("{}")
     (iter_dir / "commands.md").write_text("```bash\npytest\n```\n")
     (iter_dir / "evaluator.log").write_text("pass")
+    (iter_dir / "tc-f01-after.png").write_bytes(b"fake-png")
     (task_dir / "evaluation.json").write_text(json.dumps({
         "iteration": 1,
         "result": "pass",
@@ -51,10 +52,10 @@ def _write_common_task(task_dir: Path) -> None:
             "testCaseId": "TC-F01",
             "result": "pass",
             "acceptanceCriteria": ["AC-001"],
-            "evidence": ["logs/iter-1/evidence.txt"],
+            "evidence": ["logs/iter-1/evidence.txt", "logs/iter-1/tc-f01-after.png"],
             "evidenceAssessment": {"verdict": "proved", "machineAnchor": "logs/iter-1/evidence.txt", "hardMetrics": [{"name": "exit_code", "passed": True}]},
         }],
-        "evidence": ["logs/iter-1/evidence.txt"],
+        "evidence": ["logs/iter-1/evidence.txt", "logs/iter-1/tc-f01-after.png"],
     }))
 
 

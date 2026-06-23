@@ -34,6 +34,7 @@ def _write_runtime_task(
     tc_required: bool = True,
     tc_runtime_level: str = "runtime",
     tc_result: str = "pass",
+    with_screenshot: bool = True,
 ) -> None:
     """Write a minimal but valid client/app task fixture for completion tests."""
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -89,6 +90,10 @@ def _write_runtime_task(
     (iter_dir / "env.json").write_text("{}")
     (iter_dir / "commands.md").write_text("```bash\npytest\n```\n")
     (iter_dir / "evaluator.log").write_text("pass")
+    evidence_refs = ["logs/iter-1/evidence.txt"]
+    if with_screenshot:
+        (iter_dir / "tc-f01-after.png").write_bytes(b"fake-png")
+        evidence_refs.append("logs/iter-1/tc-f01-after.png")
     (task_dir / "evaluation.json").write_text(json.dumps({
         "iteration": 1,
         "result": "pass",
@@ -99,14 +104,14 @@ def _write_runtime_task(
             "testCaseId": "TC-F01",
             "result": tc_result,
             "acceptanceCriteria": ["AC-001"],
-            "evidence": ["logs/iter-1/evidence.txt"],
+            "evidence": list(evidence_refs),
             "evidenceAssessment": {
                 "verdict": "proved",
                 "machineAnchor": "logs/iter-1/evidence.txt",
                 "hardMetrics": [{"name": "exit_code", "passed": True}],
             },
         }],
-        "evidence": ["logs/iter-1/evidence.txt"],
+        "evidence": list(evidence_refs),
     }))
 
 
@@ -340,6 +345,10 @@ def test_completion_passes_dry_run_rescued_by_independent_secondary(tmp_path: Pa
     evaluation_path = task_dir / "evaluation.json"
     data = json.loads(evaluation_path.read_text())
     (task_dir / "logs" / "iter-1" / "device-syslog.log").write_text("music_audio_stop fired")
+    # Keep a screenshot so this test isolates the secondary-assessment rescue
+    # (the screenshot hard gate is covered by its own test).
+    (task_dir / "logs" / "iter-1" / "tc-f01-after.png").write_bytes(b"fake-png")
+    data["testResults"][0]["evidence"].append("logs/iter-1/tc-f01-after.png")
     data["testResults"][0]["evidenceAssessment"]["secondaryAssessment"] = {
         "verdict": "proved",
         "assessor": "device-syslog",
@@ -607,37 +616,120 @@ def test_mobile_review_skipped_when_user_explicitly_picks_real_device() -> None:
     needs_review = mobile_task_needs_verification_target_review(user_input, "ios")
     assert needs_review is False
 
-def test_completion_warns_when_runtime_tc_pass_lacks_screenshot(tmp_path: Path) -> None:
-    """Runtime/UI pass may finish from machine proof, but report confidence should warn without screenshots."""
+def test_completion_fails_when_runtime_tc_pass_lacks_screenshot(tmp_path: Path) -> None:
+    """Hard gate: a runtime/device required pass must carry a screenshot by
+    default. Missing both a screenshot and a noScreenshotReason now blocks
+    finish (an issue, not just a warning)."""
     task_dir = tmp_path / "task"
-    _write_runtime_task(task_dir, tc_runtime_level="runtime", tc_result="pass")
+    _write_runtime_task(task_dir, tc_runtime_level="runtime", tc_result="pass", with_screenshot=False)
 
     report, _ = build_completion_report(task_dir)
 
-    assert report["result"] == "pass", report
+    assert report["result"] == "fail", report
     assert report["coverage"]["runtimeUiPassedWithoutScreenshot"] == ["TC-F01"]
-    assert any("missing screenshot evidence" in warning for warning in report["warnings"])
+    assert report["completion"]["runtimeUiScreenshotPresent"] is False
+    assert any("without screenshot evidence" in issue for issue in report["issues"])
 
 
 def test_completion_accepts_runtime_tc_screenshot_or_no_screenshot_reason(tmp_path: Path) -> None:
+    # A real screenshot satisfies the gate.
     task_dir = tmp_path / "task"
-    _write_runtime_task(task_dir, tc_runtime_level="runtime", tc_result="pass")
-    shot = task_dir / "logs" / "iter-1" / "tc-f01-after.png"
-    shot.write_bytes(b"fake-png")
-    data = json.loads((task_dir / "evaluation.json").read_text())
-    data["testResults"][0]["evidence"].append("logs/iter-1/tc-f01-after.png")
-    (task_dir / "evaluation.json").write_text(json.dumps(data))
-
+    _write_runtime_task(task_dir, tc_runtime_level="runtime", tc_result="pass", with_screenshot=True)
     report, _ = build_completion_report(task_dir)
     assert report["result"] == "pass", report
     assert report["coverage"]["runtimeUiPassedWithoutScreenshot"] == []
 
-    # Alternative: explicit reason/substitute artifact also suppresses the confidence warning.
-    shot.unlink()
-    data["testResults"][0]["evidence"].remove("logs/iter-1/tc-f01-after.png")
+    # Alternative: explicit no-screenshot reason exempts pure-backend / no-capture surfaces.
+    task_dir2 = tmp_path / "task2"
+    _write_runtime_task(task_dir2, tc_runtime_level="runtime", tc_result="pass", with_screenshot=False)
+    data = json.loads((task_dir2 / "evaluation.json").read_text())
     data["testResults"][0]["noScreenshotReason"] = "No screenshot available; xcresult attachment is cited instead."
+    (task_dir2 / "evaluation.json").write_text(json.dumps(data))
+    report2, _ = build_completion_report(task_dir2)
+    assert report2["result"] == "pass", report2
+    assert report2["coverage"]["runtimeUiPassedWithoutScreenshot"] == []
+
+
+def test_completion_fails_when_proved_value_rests_on_truncated_log_line(tmp_path: Path) -> None:
+    """Inline-truncation hard gate: a log/keyword hardMetric whose keyword only
+    appears inside a truncated evidence line cannot stay verdict=proved. This
+    mirrors the playback_analytics_stop case where stop_type was cut off and the
+    proof reduced to source-code inference."""
+    task_dir = tmp_path / "task"
+    _write_runtime_task(task_dir, tc_runtime_level="runtime", tc_result="pass", with_screenshot=True)
+    iter_dir = task_dir / "logs" / "iter-1"
+    (iter_dir / "syslog.log").write_text(
+        'EventV3 v3_audio_over params={"a":1,"stop_type ...[truncated 4096 chars]\n'
+    )
+    data = json.loads((task_dir / "evaluation.json").read_text())
+    data["testResults"][0]["evidenceAssessment"]["hardMetrics"] = [{
+        "name": "log_keyword_matched",
+        "value": "stop_type",
+        "expected": "stop_type",
+        "passed": True,
+        "evidence": "logs/iter-1/syslog.log",
+    }]
+    (task_dir / "evaluation.json").write_text(json.dumps(data))
+
+    report, _ = build_completion_report(task_dir)
+    assert report["result"] == "fail", report
+    assert report["completion"]["runtimeAssertionProofUntruncated"] is False
+    assert any("truncated evidence line" in issue for issue in report["issues"])
+
+
+def test_completion_fails_when_truncation_explicitly_declared(tmp_path: Path) -> None:
+    """The Evaluator can self-declare assertionEvidenceTruncated; the gate then
+    refuses proved unless an independent backing exists."""
+    task_dir = tmp_path / "task"
+    _write_runtime_task(task_dir, tc_runtime_level="runtime", tc_result="pass", with_screenshot=True)
+    data = json.loads((task_dir / "evaluation.json").read_text())
+    data["testResults"][0]["evidenceAssessment"]["assertionEvidenceTruncated"] = True
+    (task_dir / "evaluation.json").write_text(json.dumps(data))
+
+    report, _ = build_completion_report(task_dir)
+    assert report["result"] == "fail", report
+    assert any("truncated evidence line" in issue for issue in report["issues"])
+
+
+def test_truncated_proof_rescued_by_independent_secondary(tmp_path: Path) -> None:
+    """A truncated primary line is acceptable when an independent secondary
+    assessor (e.g. packet capture) proves the same value."""
+    task_dir = tmp_path / "task"
+    _write_runtime_task(task_dir, tc_runtime_level="runtime", tc_result="pass", with_screenshot=True)
+    iter_dir = task_dir / "logs" / "iter-1"
+    (iter_dir / "capture.json").write_text('{"stop_type": 3}')
+    data = json.loads((task_dir / "evaluation.json").read_text())
+    assessment = data["testResults"][0]["evidenceAssessment"]
+    assessment["assertionEvidenceTruncated"] = True
+    assessment["secondaryAssessment"] = {
+        "verdict": "proved",
+        "assessor": "packet-capture",
+        "independent": True,
+        "evidence": "logs/iter-1/capture.json",
+    }
     (task_dir / "evaluation.json").write_text(json.dumps(data))
 
     report, _ = build_completion_report(task_dir)
     assert report["result"] == "pass", report
-    assert report["coverage"]["runtimeUiPassedWithoutScreenshot"] == []
+    assert report["completion"]["runtimeAssertionProofUntruncated"] is True
+
+
+def test_untruncated_keyword_line_passes_truncation_gate(tmp_path: Path) -> None:
+    """A clean (untruncated) keyword line must not trip the truncation gate."""
+    task_dir = tmp_path / "task"
+    _write_runtime_task(task_dir, tc_runtime_level="runtime", tc_result="pass", with_screenshot=True)
+    iter_dir = task_dir / "logs" / "iter-1"
+    (iter_dir / "syslog.log").write_text('EventV3 v3_audio_over params stop_type=3 is_end=1\n')
+    data = json.loads((task_dir / "evaluation.json").read_text())
+    data["testResults"][0]["evidenceAssessment"]["hardMetrics"] = [{
+        "name": "log_keyword_matched",
+        "value": "stop_type",
+        "expected": "stop_type",
+        "passed": True,
+        "evidence": "logs/iter-1/syslog.log",
+    }]
+    (task_dir / "evaluation.json").write_text(json.dumps(data))
+
+    report, _ = build_completion_report(task_dir)
+    assert report["result"] == "pass", report
+    assert report["completion"]["runtimeAssertionProofUntruncated"] is True

@@ -41,11 +41,16 @@ def test_generate_html_report_includes_requirements_evidence_and_screenshots(tmp
     assert "TC-F01" in html
     assert "Key Evidence" in html
     assert "Evidence / Screenshots / Logs" in html
+    assert "Open Requirements.md" in html
+    assert "Open TestCases.md" in html
     assert "All linked artifacts" in html
     assert "logs/iter-1/evaluator.log" in html
     assert "logs/iter-1/screen.png" in html
     assert "Summary / Knowledge Deposition" in html
-    assert "Lightweight Evidence Index" in html
+    assert "Evidence Lookup" in html
+    assert "All Artifacts Appendix" in html
+    assert "Lightweight Evidence Index" not in html
+    assert "Raw Artifact Appendix" not in html
     assert "playback_log" in html
     assert "Screenshots" in html
     assert "Delivery.md excerpt" in html

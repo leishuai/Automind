@@ -98,6 +98,81 @@ def test_record_tc_attempts_extracts_nested_ui_exploration(tmp_path: Path) -> No
     assert progress["narrowingRounds"] == 1
 
 
+def test_record_tc_attempts_surfaces_failed_checks_recovery_action(tmp_path: Path) -> None:
+    """When evaluator writes a recoveryAction under failedChecks[] (the
+    canonical place for failure-triage data), the TC convergence ledger must
+    expose it so the next Generator round sees it. ExampleApp-style build-failure
+    loop breaks because the recovery action ('run pod install') reaches the
+    Generator instead of being lost."""
+    task_dir = tmp_path / "task03"
+    write_testcases(task_dir)
+    evaluation = {
+        "iteration": 31,
+        "result": "fail",
+        "nextAction": "retry_generator",
+        "testResults": [{
+            "testCaseId": "TC-F04",
+            "result": "fail",
+            "attemptIteration": 31,
+            "summary": "Build failed.",
+        }],
+        "failedChecks": [{
+            "testCaseIds": ["TC-F04"],
+            "category": "dependency_missing",
+            "recoveryAction": "Run `pod install` at the workspace root.",
+            "sameProblemKey": "ios.build.pod.SSUGCoinWidget_missing",
+            "specificErrors": [
+                "TTReadingWidgetExtension.swift:11:8: error: unable to find module dependency: 'SSUGCoinWidget'",
+                "NotificationService.m:10:9: error: 'BDUGPushSDK/BDUGPushExtension.h' file not found",
+            ],
+        }],
+    }
+
+    record_tc_attempts(task_dir, evaluation, source="evaluation")
+    saved = read_tc_attempts(task_dir)
+    progress = saved["progressByTc"]["TC-F04"]
+
+    assert any("Run `pod install`" in action for action in (progress.get("recoveryActions") or []))
+    assert "dependency_missing" in (progress.get("failureCategories") or [])
+    assert "ios.build.pod.SSUGCoinWidget_missing" in (progress.get("sameProblemKeys") or [])
+    assert len(progress.get("specificErrors") or []) == 2
+    assert progress.get("hasSpecificRecovery") is True
+
+
+def test_record_tc_attempts_no_recovery_is_invalid_triage(tmp_path: Path) -> None:
+    """When failedChecks[] repeats the same broad 'build failed' without
+    specific recovery, the ledger must still record the (empty) triage info
+    and flag that no specific recovery is available. The Generator can then
+    decide to read the log itself."""
+    task_dir = tmp_path / "task04"
+    write_testcases(task_dir)
+    evaluation = {
+        "iteration": 35,
+        "result": "fail",
+        "nextAction": "retry_generator",
+        "testResults": [{
+            "testCaseId": "TC-F04",
+            "result": "fail",
+            "attemptIteration": 35,
+            "summary": "Build failed.",
+        }],
+        "failedChecks": [{
+            "testCaseIds": ["TC-F04"],
+            "category": "build_failure",
+            "summary": "Build failed.",
+            "sameProblemKey": "ios.build.failure",
+        }],
+    }
+
+    record_tc_attempts(task_dir, evaluation, source="evaluation")
+    saved = read_tc_attempts(task_dir)
+    progress = saved["progressByTc"]["TC-F04"]
+
+    assert progress.get("recoveryActions") == []
+    assert progress.get("specificErrors") == []
+    assert progress.get("hasSpecificRecovery") is False
+
+
 def test_record_tc_attempts_flags_no_narrowing(tmp_path: Path) -> None:
     """P0-B: repeated failing attempts that rule nothing out and propose no new
     candidate must show narrowingRounds == 0 (invalid retry pattern)."""

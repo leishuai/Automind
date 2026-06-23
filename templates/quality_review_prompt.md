@@ -55,6 +55,16 @@ Output concise JSON only. Do not use markdown fences.
 }
 ```
 
+## Model-Review Signal Protocol
+
+`evaluation.json.qualityChecks[]` entries carry `triageSource` and `needsModelReview` fields. You MUST scan them and respect their meaning:
+
+- `triageSource=code_deterministic` + `needsModelReview=false` — the rule-based quality-check already classified this with confidence. Accept its `result` / `reason` / `category` as-is. No re-analysis required.
+- `triageSource=requires_model_review` + `needsModelReview=true` — this is your cue. The code could not decide: heuristic warning, soft crash keyword without stack, soft timeout, or architecture signal without conclusive evidence. You MUST re-read the referenced evidence and produce a re-evaluated entry. Output it with `triageSource=model_reviewed`, `needsModelReview=false`, and a concrete `result`/`reason`. If after reading the evidence you still cannot confirm a product issue, keep `result=warn` with an explicit reason that explains why you declined to escalate to `fail`. Do not leave any entry with `needsModelReview=true` in your output.
+- `triageSource=model_reviewed` + `needsModelReview=false` — a previous iteration already did the re-analysis above. Use the `category` / `recoveryAction` / `sameProblemKey` (when present) to drive retry decisions.
+
+For every `qualityChecks[]` entry you emit, ALWAYS include `triageSource` and `needsModelReview`, matching the schema in the Output section.
+
 ## Policy
 
 Be conservative:
@@ -64,3 +74,25 @@ Be conservative:
 - When recommending `fail` for stability, include `failureClass` and evidence context: `product_crash_with_stack` or `product_timeout_or_hang`, crash stack/backtrace, process/bundle, occurred page/screen/scene, reproduction path, and stability/reproducibility. If stable and product-attributable, recommend `retry_generator`; otherwise keep it warning-level and request diagnostics.
 - Do not invent requirements that are not in Require/TestCases.
 - If the review would require product judgment or risk acceptance, use `blocked` and recommend asking the human.
+
+### Output
+
+```json
+{
+  "result": "pass|warn|fail|blocked",
+  "summary": "One-line semantic quality review result.",
+  "qualityChecks": [
+    {
+      "id": "semantic-architecture-review",
+      "category": "architecture|performance|ux|stability|maintainability|other",
+      "result": "pass|warn|fail|blocked",
+      "reason": "Concrete reason grounded in evidence.",
+      "evidence": "path or diff reference when available",
+      "triageSource": "code_deterministic|requires_model_review|model_reviewed",
+      "needsModelReview": true|false
+    }
+  ],
+  "recommendedNextAction": "finish|retry_generator|replan|ask_user|stop",
+  "notes": ["Optional short notes for Validation.md"]
+}
+```

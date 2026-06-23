@@ -335,21 +335,76 @@ def write_outputs(task_code: str, iteration: int, result: dict[str, Any]) -> Pat
     return out_json
 
 
+def recommend_team_detail(identities: list[dict[str, str]], xcode: dict[str, Any]) -> dict[str, Any]:
+    """Rich model-first variant: return a dict that signals whether the code
+    could pick a Team with confidence, or whether the caller should hand the
+    decision off to the Evaluator / generator.
+
+    Returns:
+      teams: ordered list of recommended Team IDs (same as recommend_team).
+      triageSource: "code_deterministic" when a project-declared Team matches
+          an available codesigning identity; "requires_model_review" otherwise
+          (we had to fall back to identity-only Teams or we found nothing).
+      needsModelReview: True when triageSource is requires_model_review —
+          lets the harness bubble the decision up to the model instead of
+          silently picking a suboptimal Team.
+      reason: human-readable explanation.
+      evidence: the machine-visible input buckets so consumers can reproduce
+          the decision.
+    """
+    identity_teams = {i.get("teamId") for i in identities if i.get("teamId")}
+    project_teams = set(xcode.get("developmentTeams") or []) | set(xcode.get("exportTeamIds") or [])
+    preferred = [t for t in (xcode.get("developmentTeams") or []) if t in identity_teams]
+    evidence = {
+        "projectDeclaredTeams": sorted(project_teams),
+        "identityBackedTeams": sorted(identity_teams),
+    }
+    if preferred:
+        return {
+            "teams": preferred,
+            "triageSource": "code_deterministic",
+            "needsModelReview": False,
+            "reason": "Project-declared DEVELOPMENT_TEAM matches a local codesigning identity; picked deterministically.",
+            "evidence": evidence,
+        }
+    secondary = sorted(project_teams & identity_teams)
+    if secondary:
+        return {
+            "teams": secondary,
+            "triageSource": "code_deterministic",
+            "needsModelReview": False,
+            "reason": "Project-declared exportTeamId / developmentTeam matches a local codesigning identity; picked deterministically.",
+            "evidence": evidence,
+        }
+    fallback = sorted(t for t in identity_teams if t)
+    if fallback:
+        return {
+            "teams": fallback,
+            "triageSource": "requires_model_review",
+            "needsModelReview": True,
+            "reason": "No project-declared Team matched a local codesigning identity; falling back to identity-only Teams. The Evaluator should verify this Team is acceptable before committing to sign under it.",
+            "evidence": evidence,
+        }
+    return {
+        "teams": [],
+        "triageSource": "requires_model_review",
+        "needsModelReview": True,
+        "reason": "No codesigning identity and no project-declared Team resolved; signing material must be added or the task should escalate to ask_user.",
+        "evidence": evidence,
+    }
+
+
 def recommend_team(identities: list[dict[str, str]], xcode: dict[str, Any]) -> list[str]:
     """Pick the Team(s) to re-sign with, preferring one the project declares
     AND that is backed by an available codesigning identity.
 
     Shared by --discover and by the xcuitest runner's auto-fill so both reuse
     the same selection rule (single source of truth).
+
+    Thin wrapper over recommend_team_detail: returns only the ordered list of
+    Team IDs. Callers that need triage/evidence should use recommend_team_detail.
     """
-    identity_teams = {i.get("teamId") for i in identities if i.get("teamId")}
-    project_teams = set(xcode.get("developmentTeams") or []) | set(xcode.get("exportTeamIds") or [])
-    preferred = [t for t in (xcode.get("developmentTeams") or []) if t in identity_teams]
-    if not preferred:
-        preferred = sorted(project_teams & identity_teams)
-    if not preferred:
-        preferred = sorted(t for t in identity_teams if t)
-    return preferred
+    return recommend_team_detail(identities, xcode)["teams"]
 
 
 def build_signing_plan(
@@ -440,6 +495,8 @@ def build_signing_plan(
             "codeSignStyle": "",
             "askUser": False,
             "category": "old_team_signing_available",
+            "triageSource": "code_deterministic",
+            "needsModelReview": False,
             "targetTeamManagedByAppleId": bool(seed_team) and seed_team in managed_teams,
             "hasIdentityForTeam": bool(seed_team) and seed_team in identity_teams,
             "teamProfileCount": 0,
@@ -463,6 +520,8 @@ def build_signing_plan(
                 "codeSignStyle": "Manual",
                 "askUser": False,
                 "category": "old_team_signing_available",
+                "triageSource": "code_deterministic",
+                "needsModelReview": False,
                 "targetTeamManagedByAppleId": t in managed_teams,
                 "hasIdentityForTeam": True,
                 "teamProfileCount": len([p for p in usable_profiles if t in (p.team_ids or [])]),
@@ -508,6 +567,8 @@ def build_signing_plan(
                 "codeSignStyle": "Automatic",
                 "askUser": False,
                 "category": "old_team_signing_available",
+                "triageSource": "code_deterministic",
+                "needsModelReview": False,
                 "targetTeamManagedByAppleId": True,
                 "hasIdentityForTeam": t in identity_teams,
                 "teamProfileCount": len([p for p in usable_profiles if t in (p.team_ids or [])]),
@@ -571,6 +632,8 @@ def build_signing_plan(
         "codeSignStyle": "",
         "askUser": True,
         "category": category,
+        "triageSource": "code_deterministic",
+        "needsModelReview": False,
         "targetTeamManagedByAppleId": bool(seed_team) and seed_team in managed_teams,
         "hasIdentityForTeam": seed_has_identity,
         "teamProfileCount": len([p for p in usable_profiles if seed_team in (p.team_ids or [])]) if seed_team else 0,

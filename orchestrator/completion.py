@@ -1140,6 +1140,136 @@ def evidence_assessment_metric_evidence_missing(task_dir: Path, item: dict) -> t
     return True, "proved hardMetrics must reference at least one existing evidence artifact"
 
 
+# Markers that mean a piece of evidence text was cut off, so a value that
+# appears near such a marker may be incomplete and must not be trusted as a
+# precise runtime assertion anchor. Covers AutoMind's own digest/tail markers.
+_TRUNCATION_MARKERS = (
+    "[truncated",
+    "truncated for",
+    "compact excerpt: omitted",
+    "characters truncated",
+    "some characters truncated",
+    "output truncated",
+    "log truncated",
+    "…",
+)
+
+# Evidence-assessment / metric fields by which the Evaluator can explicitly
+# declare that the runtime assertion value came from a truncated/incomplete log
+# line (so the proof actually rests on source-code inference, not observation).
+_TRUNCATION_DECLARATION_KEYS = (
+    "assertionEvidenceTruncated",
+    "runtimeAssertionFromTruncatedEvidence",
+    "truncatedAssertionField",
+    "assertionFieldTruncated",
+)
+
+_SCREENSHOT_OR_BINARY_SUFFIXES = SCREENSHOT_SUFFIXES | {".xcresult", ".mov", ".mp4", ".zip"}
+
+
+def _declares_assertion_truncation(item: dict) -> bool:
+    assessment = item.get("evidenceAssessment") if isinstance(item.get("evidenceAssessment"), dict) else {}
+    for source in (item, assessment):
+        for key in _TRUNCATION_DECLARATION_KEYS:
+            if bool(source.get(key)):
+                return True
+    for metric in assessment.get("hardMetrics") or []:
+        if isinstance(metric, dict):
+            for key in _TRUNCATION_DECLARATION_KEYS:
+                if bool(metric.get(key)):
+                    return True
+    return False
+
+
+def _evidence_line_is_truncated(task_dir: Path, ref: object, keyword: object) -> bool:
+    """Return True iff the line proving ``keyword`` in evidence ``ref`` is cut off.
+
+    Only inspects textual log/json evidence; screenshots/xcresult are skipped.
+    Without a keyword we conservatively do not flag (avoids false positives on
+    large logs whose tail is legitimately a digest marker).
+    """
+    if not ref or not keyword:
+        return False
+    suffix = Path(str(ref)).suffix.lower()
+    if suffix in _SCREENSHOT_OR_BINARY_SUFFIXES:
+        return False
+    path = Path(str(ref)) if Path(str(ref)).is_absolute() else (task_dir / str(ref))
+    try:
+        if not path.is_file():
+            return False
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    token = str(keyword).strip()
+    if not token:
+        return False
+    for line in text.splitlines():
+        if token in line and any(marker in line for marker in _TRUNCATION_MARKERS):
+            return True
+    return False
+
+
+def evidence_assessment_truncated_proof_unbacked(task_dir: Path, item: dict) -> tuple[bool, str]:
+    """Forbid verdict=proved when the runtime assertion rests on a truncated line.
+
+    Two signals trip this gate for a proved required pass row:
+
+    * The Evaluator explicitly declared the assertion value came from a
+      truncated/incomplete log line (model-first triage declaration), or
+    * a passed log/keyword hardMetric's keyword only appears inside an evidence
+      line that carries a truncation marker.
+
+    Either way the proof reduces to source-code inference of an unobserved
+    value. The row may only stay proved if it is independently backed by a
+    secondaryAssessment (manual_confirmed/proved by a different assessor) or a
+    recorded humanConfirmation; otherwise it must be re-verified with an
+    untruncated channel (single-field log line, packet capture, xcresult dump).
+    """
+    if normalize_test_result_value(item.get("result", "")) != "pass":
+        return False, ""
+    if assessment_verdict(item) != "proved":
+        return False, ""
+    assessment = normalize_evidence_assessment(item)
+    # An independent second judge or human confirmation is an acceptable backing.
+    if _secondary_assessment_independent_proved(assessment):
+        return False, ""
+    human = item.get("humanConfirmation") if isinstance(item.get("humanConfirmation"), dict) else {}
+    if str(human.get("status") or "").strip().lower() == "confirmed":
+        return False, ""
+
+    declared = _declares_assertion_truncation(item)
+    marker_truncated = False
+    for metric in _hard_metrics_passed(assessment):
+        name = str(metric.get("name") or "").strip().lower()
+        if not any(tok in name for tok in ("log", "keyword", "grep", "regex", "string", "ocr")):
+            continue
+        keyword = metric.get("expected")
+        if keyword is None or isinstance(keyword, bool):
+            keyword = metric.get("value")
+        refs = normalize_evidence_refs(
+            metric.get("evidence")
+            or metric.get("evidencePath")
+            or metric.get("evidencePaths")
+            or metric.get("artifact")
+            or metric.get("artifacts")
+        ) or normalize_evidence_refs(assessment.get("machineAnchor"))
+        for ref in refs:
+            if _evidence_line_is_truncated(task_dir, ref, keyword):
+                marker_truncated = True
+                break
+        if marker_truncated:
+            break
+
+    if not declared and not marker_truncated:
+        return False, ""
+    return True, (
+        "verdict=proved but the runtime assertion value rests on a truncated/incomplete "
+        "evidence line (source-code inference, not observation). Re-verify via an untruncated "
+        "channel (dedicated single-field log line, packet capture, or xcresult attachment dump), "
+        "or back the row with an independent secondaryAssessment / recorded humanConfirmation."
+    )
+
+
 # Markers that identify a probe-flow / UI runner result as a dry-run, i.e. it
 # only validated action *intent* and never drove the real device/runtime.
 _DRY_RUN_METRIC_MARKERS = ("dry_run", "dryrun", "dry-run")
@@ -1501,6 +1631,7 @@ def build_completion_report(
     evidence_assessment_missing: list[str] = []
     proved_anchor_missing: list[dict] = []
     metric_evidence_missing: list[dict] = []
+    truncated_proof_unbacked: list[dict] = []
     covered_ac: set[str] = set()
 
     top_level_evidence = normalize_evidence_refs(evaluation.get("evidence", []))
@@ -1534,6 +1665,12 @@ def build_completion_report(
                         "id": tc["id"],
                         "reason": metric_reason,
                     })
+                trunc_missing, trunc_reason = evidence_assessment_truncated_proof_unbacked(task_dir, item)
+                if trunc_missing:
+                    truncated_proof_unbacked.append({
+                        "id": tc["id"],
+                        "reason": trunc_reason,
+                    })
             elif result in {"skipped"}:
                 skipped_required.append(tc["id"])
             elif result in {"not_run", "unknown"}:
@@ -1560,6 +1697,10 @@ def build_completion_report(
     for entry in metric_evidence_missing:
         issues.append(
             f"required testcase proved metric lacks existing evidence artifact: {entry['id']} ({entry['reason']})"
+        )
+    for entry in truncated_proof_unbacked:
+        issues.append(
+            f"required testcase verdict=proved rests on truncated evidence line: {entry['id']} ({entry['reason']})"
         )
 
     open_ac_norms = set(required_ac.keys()) - covered_ac
@@ -1690,10 +1831,16 @@ def build_completion_report(
         )
 
     if runtime_ui_passed_without_screenshot:
-        warnings.append(
-            "runtime/UI passed TC missing screenshot evidence or explicit no-screenshot reason: "
+        # Hard gate: a runtime/device-level required TC that passed must carry a
+        # screenshot by default. Pure-backend / no-screenshot-capability cases
+        # stay unblocked by declaring an explicit noScreenshotReason (those TCs
+        # were already filtered out above via _result_mentions_no_screenshot_reason).
+        issues.append(
+            "runtime/device-level required TC passed without screenshot evidence and without an "
+            "explicit noScreenshotReason: "
             + ", ".join(runtime_ui_passed_without_screenshot)
-            + ". Capture per-TC/page screenshots by default (or attach xcresult/UI artifact / noScreenshotReason) to improve report confidence."
+            + ". Capture a per-TC/page screenshot (or attach xcresult/UI artifact), or record a "
+            "noScreenshotReason when the verification surface genuinely cannot produce a screenshot."
         )
 
     if evaluation.get("result") != "pass":
@@ -1711,6 +1858,7 @@ def build_completion_report(
         "requiredTestCasesNotRun": not_run_required,
         "evidenceAssessmentMissing": evidence_assessment_missing,
         "provedAnchorMissing": proved_anchor_missing,
+        "truncatedProofUnbacked": truncated_proof_unbacked,
         "acceptanceCriteriaRequired": list(required_ac.values()),
         "acceptanceCriteriaCovered": [required_ac[norm] for norm in required_ac.keys() if norm in covered_ac],
         "acceptanceCriteriaOpen": [required_ac[norm] for norm in sorted(open_ac_norms, key=lambda item: required_ac[item])],
@@ -1807,6 +1955,8 @@ def build_completion_report(
             "noRequiredPassViaBlockerClassification": not blocker_pass_required,
             "requiredEvidenceAssessmentPresent": not evidence_assessment_missing,
             "requiredProvedAnchorPresent": not proved_anchor_missing,
+            "runtimeAssertionProofUntruncated": not truncated_proof_unbacked,
+            "runtimeUiScreenshotPresent": not runtime_ui_passed_without_screenshot,
             "strongPostChecksSatisfied": not strong_post_check_failures,
             "runtimeProofSatisfied": runtime_proof_satisfied,
         },

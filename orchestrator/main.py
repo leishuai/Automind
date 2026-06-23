@@ -516,13 +516,34 @@ def infer_workspace_client_platforms() -> set[str]:
     return platforms
 
 
-def is_client_development_or_verification_task(user_input: str, task_type: str | None = None) -> bool:
-    """Return True only for client/app work, not every mention of iOS/Android."""
+def is_client_development_or_verification_task_detail(user_input: str, task_type: str | None = None) -> dict[str, Any]:
+    """Rich model-first variant: decide whether this is real client/app work.
+
+    Returns a dict with:
+      isClientTask: bool — the thin-wrapper return value.
+      triageSource: "code_deterministic" when the decision rests on a hard
+          structural fact (non-mobile task type, explicit negative signal) or
+          on an explicit client keyword. "requires_model_review" when the
+          positive decision relies only on the weak
+          workspace-platform + action-keyword heuristic, or when a mobile
+          task has no client/action signal at all.
+      needsModelReview: True iff the decision is heuristic enough to re-examine.
+      matchedKeyword: which signal bucket fired.
+      reason: short human-readable description.
+    """
     resolved_task_type = task_type or infer_task_type(user_input)
     if resolved_task_type not in {"ios", "android", "dual"}:
-        return False
+        return {
+            "isClientTask": False, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "non_mobile_task_type",
+            "reason": f"任务类型为 {resolved_task_type}，不是 ios/android/dual，按定义不是客户端/App 任务。",
+        }
     if has_negative_mobile_device_signal(user_input):
-        return False
+        return {
+            "isClientTask": False, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "negative_mobile_signal",
+            "reason": "请求中明确声明无需移动设备/真机验证。",
+        }
     text = (user_input or "").lower()
     workspace_platforms = infer_workspace_client_platforms()
     workspace_matches_platform = bool(workspace_platforms) and (
@@ -544,12 +565,35 @@ def is_client_development_or_verification_task(user_input: str, task_type: str |
         "test", "run", "launch", "install", "repair", "develop",
         "修复", "实现", "新增", "修改", "开发", "验证", "测试", "运行", "启动", "安装",
     ]
-    explicit_client_signal = (
-        any(marker in text for marker in client_markers)
-        or any(marker in user_input for marker in chinese_client_markers)
-    )
+    matched_client_en = next((m for m in client_markers if m in text), None)
+    matched_client_zh = next((m for m in chinese_client_markers if m in (user_input or "")), None)
+    explicit_client_signal = bool(matched_client_en or matched_client_zh)
     development_or_verification_signal = any(marker in text for marker in action_markers)
-    return explicit_client_signal or (workspace_matches_platform and development_or_verification_signal)
+    if explicit_client_signal:
+        return {
+            "isClientTask": True, "triageSource": "code_deterministic",
+            "needsModelReview": False,
+            "matchedKeyword": "client_token:" + (matched_client_en or matched_client_zh or ""),
+            "reason": "请求中出现明确的客户端/UI关键词。",
+        }
+    if workspace_matches_platform and development_or_verification_signal:
+        return {
+            "isClientTask": True, "triageSource": "requires_model_review",
+            "needsModelReview": True, "matchedKeyword": "workspace_plus_action",
+            "reason": "没有显式客户端关键词，仅凭 workspace 平台匹配 + 动作词推断为客户端任务；这是弱启发式，模型应结合项目上下文确认是否确实涉及客户端/UI。",
+        }
+    return {
+        "isClientTask": False, "triageSource": "requires_model_review",
+        "needsModelReview": True, "matchedKeyword": "mobile_task_no_client_signal",
+        "reason": "任务类型是移动端但没有任何客户端/动作信号，关键词无法确定，模型应再确认这是否真的是客户端开发/验证任务。",
+    }
+
+
+def is_client_development_or_verification_task(user_input: str, task_type: str | None = None) -> bool:
+    """Return True only for client/app work, not every mention of iOS/Android. Thin
+    wrapper over is_client_development_or_verification_task_detail; callers needing
+    triage metadata should use the _detail variant."""
+    return is_client_development_or_verification_task_detail(user_input, task_type)["isClientTask"]
 
 
 def run_short_device_command(cmd: list[str], timeout: int = 5) -> tuple[int, str]:
@@ -816,18 +860,27 @@ def format_device_discovery_diagnostic(device_discovery: dict) -> str:
     return "; ".join(parts)
 
 
-def mentions_hardstop_device_unavailable_phrasing(user_input: str) -> bool:
-    """Return True when the user says real-device verification is unavailable.
+def mentions_hardstop_device_unavailable_phrasing_detail(user_input: str) -> dict[str, Any]:
+    """Rich model-first variant: detect "real-device unavailable" constraints.
 
-    Users may mention "真机不可用" / "no real device" as a constraint. Do not
-    misread the bare token "真机" / "real device" as a positive request to use
-    a real device. Current policy is real-device preferred, then
-    simulator/emulator by default when real-device verification is unavailable;
-    ask_user only for multiple-device selection, no runnable dynamic fallback,
-    or separate sensitive actions.
+    Returns a dict with:
+      mentionsUnavailable: bool — the thin-wrapper return value.
+      triageSource: "code_deterministic" when an explicit anchor+unavailable
+          pair matched (high confidence the user said device is unavailable),
+          OR when no device anchor word appears at all (confidently no such
+          claim). "requires_model_review" when a device anchor word appears
+          near a possibly-negative context but no explicit pair matched, since
+          natural-language negation is easy to miss.
+      needsModelReview: True iff a device anchor appeared without a clean pair.
+      matchedKeyword: which bucket fired.
+      reason: short human-readable description.
     """
     if not user_input:
-        return False
+        return {
+            "mentionsUnavailable": False, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "empty_input",
+            "reason": "空输入，没有任何设备不可用表述。",
+        }
     lower = user_input.lower()
     cn_unavail = ["不可用", "不能用", "无法使用", "用不了", "没真机", "无真机", "无可用"]
     en_unavail = [
@@ -843,34 +896,155 @@ def mentions_hardstop_device_unavailable_phrasing(user_input: str) -> bool:
     ]
     cn_anchor_tokens = ["真机", "物理机", "实体设备"]
     en_anchor_tokens = ["real device", "physical device"]
-    has_cn_pair = any(token in user_input for token in cn_anchor_tokens) and any(
-        token in user_input for token in cn_unavail
-    )
-    has_en_pair = any(token in lower for token in en_anchor_tokens) and any(
-        token in lower for token in en_unavail
-    )
-    return has_cn_pair or has_en_pair
+    has_cn_anchor = any(token in user_input for token in cn_anchor_tokens)
+    has_en_anchor = any(token in lower for token in en_anchor_tokens)
+    has_cn_pair = has_cn_anchor and any(token in user_input for token in cn_unavail)
+    has_en_pair = has_en_anchor and any(token in lower for token in en_unavail)
+    if has_cn_pair or has_en_pair:
+        return {
+            "mentionsUnavailable": True, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "anchor_unavailable_pair",
+            "reason": "检出真机/physical device 锚点词与不可用否定词成对出现，明确表达真机不可用。",
+        }
+    if has_cn_anchor or has_en_anchor:
+        return {
+            "mentionsUnavailable": False, "triageSource": "requires_model_review",
+            "needsModelReview": True, "matchedKeyword": "anchor_without_pair",
+            "reason": "出现真机/physical device 锚点词但没匹配到成对的不可用否定词；自然语言否定表达多样（如“手头没设备”“暂时连不上手机”），模型应确认用户是否其实在表达真机不可用。",
+        }
+    return {
+        "mentionsUnavailable": False, "triageSource": "code_deterministic",
+        "needsModelReview": False, "matchedKeyword": "no_device_anchor",
+        "reason": "完全没有真机/physical device 锚点词，确定不是真机不可用表述。",
+    }
 
 
-def mobile_task_needs_verification_target_review(user_input: str, task_type: str | None = None) -> bool:
-    """Return True when the early mobile target review should run."""
+def mentions_hardstop_device_unavailable_phrasing(user_input: str) -> bool:
+    """Return True when the user says real-device verification is unavailable.
+
+    Users may mention "真机不可用" / "no real device" as a constraint. Do not
+    misread the bare token "真机" / "real device" as a positive request to use
+    a real device. Current policy is real-device preferred, then
+    simulator/emulator by default when real-device verification is unavailable;
+    ask_user only for multiple-device selection, no runnable dynamic fallback,
+    or separate sensitive actions.
+
+    Thin wrapper over mentions_hardstop_device_unavailable_phrasing_detail;
+    callers needing triage metadata should use the _detail variant.
+    """
+    return mentions_hardstop_device_unavailable_phrasing_detail(user_input)["mentionsUnavailable"]
+
+
+def mobile_task_needs_verification_target_review_detail(user_input: str, task_type: str | None = None) -> dict[str, Any]:
+    """Rich model-first variant: decide whether the early mobile target review
+    should run (i.e. ask the user real-device vs simulator/emulator).
+
+    Returns a dict with:
+      needsReview: bool — the thin-wrapper return value.
+      triageSource: "code_deterministic" when a hard structural fact decides it
+          (non-mobile, not a client task, explicit unavailable pair, or an
+          explicit device-target keyword already present).
+          "requires_model_review" for the fallback "no target keyword found ->
+          assume unclear", because absence of keywords is not proof the user
+          failed to express a target.
+      needsModelReview: True iff the positive review trigger came from the
+          weak "no keyword" fallback.
+      matchedKeyword: which bucket fired.
+      reason: short human-readable description.
+    """
     text = (user_input or "").lower()
     resolved_task_type = task_type or infer_task_type(user_input)
     if resolved_task_type not in {"ios", "android", "dual"}:
-        return False
+        return {
+            "needsReview": False, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "non_mobile_task_type",
+            "reason": "非移动端任务，不需要做移动验证目标审查。",
+        }
     if not is_client_development_or_verification_task(user_input, resolved_task_type):
-        return False
+        return {
+            "needsReview": False, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "not_client_task",
+            "reason": "不是客户端开发/验证任务，不需要移动验证目标审查。",
+        }
     # If the user mentions "真机不可用" / "device unavailable", do NOT treat
     # that as a positive real-device choice. Keep the mobile target review
     # active so AutoMind can record the simulator/emulator fallback policy.
     if mentions_hardstop_device_unavailable_phrasing(user_input):
-        return True
+        return {
+            "needsReview": True, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "device_unavailable",
+            "reason": "用户表达真机不可用，需保留审查以记录模拟器/仿真器 fallback 策略。",
+        }
     if any(keyword in text for keyword in [
         "真机", "物理机", "实体设备", "模拟器", "仿真器",
         "real device", "physical device", "simulator", "emulator",
     ]):
-        return False
-    return True
+        return {
+            "needsReview": False, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "explicit_target",
+            "reason": "用户已明确提到真机或模拟器验证目标，无需再追问。",
+        }
+    return {
+        "needsReview": True, "triageSource": "requires_model_review",
+        "needsModelReview": True, "matchedKeyword": "no_target_keyword",
+        "reason": "没有命中真机/模拟器关键词就判定“目标不清”，这是反向弱启发式；用户可能用其它措辞已表达过目标，模型应结合上下文确认是否真的需要追问。",
+    }
+
+
+def mobile_task_needs_verification_target_review(user_input: str, task_type: str | None = None) -> bool:
+    """Return True when the early mobile target review should run. Thin wrapper
+    over mobile_task_needs_verification_target_review_detail; callers needing
+    triage metadata should use the _detail variant."""
+    return mobile_task_needs_verification_target_review_detail(user_input, task_type)["needsReview"]
+
+
+def mobile_verification_mentions_simulator_only_detail(user_input: str, task_type: str | None = None) -> dict[str, Any]:
+    """Rich model-first variant: detect an explicit simulator/emulator-only choice.
+
+    Returns a dict with:
+      simulatorOnly: bool — the thin-wrapper return value.
+      triageSource: "code_deterministic" for structural no-ops and for the
+          clean "simulator present, real-device absent" signal.
+          "requires_model_review" when both simulator and real-device keywords
+          appear (mixed/sequenced intent like "先模拟器跑通再上真机"), because the
+          simple boolean combination would silently drop the real-device part.
+      needsModelReview: True iff mixed simulator+real-device signals appeared.
+      matchedKeyword: which bucket fired.
+      reason: short human-readable description.
+    """
+    text = (user_input or "").lower()
+    resolved_task_type = task_type or infer_task_type(user_input)
+    if resolved_task_type not in {"ios", "android", "dual"}:
+        return {
+            "simulatorOnly": False, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "non_mobile_task_type",
+            "reason": "非移动端任务，无所谓模拟器选择。",
+        }
+    if not is_client_development_or_verification_task(user_input, resolved_task_type):
+        return {
+            "simulatorOnly": False, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "not_client_task",
+            "reason": "不是客户端任务，无所谓模拟器选择。",
+        }
+    has_simulator = any(keyword in text for keyword in ["模拟器", "仿真器", "simulator", "emulator"])
+    has_real_device = any(keyword in text for keyword in ["真机", "物理机", "实体设备", "real device", "physical device"])
+    if has_simulator and has_real_device:
+        return {
+            "simulatorOnly": False, "triageSource": "requires_model_review",
+            "needsModelReview": True, "matchedKeyword": "mixed_simulator_and_real",
+            "reason": "同时出现模拟器与真机关键词（可能是“先模拟器跑通再上真机”这类混合/有先后顺序的表达），纯布尔组合会误读，模型应确认用户真正的验证目标。",
+        }
+    if has_simulator:
+        return {
+            "simulatorOnly": True, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "simulator_only",
+            "reason": "只出现模拟器/仿真器关键词、无真机关键词，明确为模拟器优先。",
+        }
+    return {
+        "simulatorOnly": False, "triageSource": "code_deterministic",
+        "needsModelReview": False, "matchedKeyword": "no_simulator_signal",
+        "reason": "没有模拟器关键词，不是模拟器-only。",
+    }
 
 
 def mobile_verification_mentions_simulator_only(user_input: str, task_type: str | None = None) -> bool:
@@ -880,16 +1054,52 @@ def mobile_verification_mentions_simulator_only(user_input: str, task_type: str 
     that choice. We still record this signal so audit logs/reuse can show the
     decision, but it MUST NOT escalate to ``ask_user`` — see the
     "follow-user-stated-target" policy in AGENTS.md / docs/workflow.md.
+
+    Thin wrapper over mobile_verification_mentions_simulator_only_detail;
+    callers needing triage metadata should use the _detail variant.
     """
-    text = (user_input or "").lower()
-    resolved_task_type = task_type or infer_task_type(user_input)
-    if resolved_task_type not in {"ios", "android", "dual"}:
-        return False
-    if not is_client_development_or_verification_task(user_input, resolved_task_type):
-        return False
-    has_simulator = any(keyword in text for keyword in ["模拟器", "仿真器", "simulator", "emulator"])
-    has_real_device = any(keyword in text for keyword in ["真机", "物理机", "实体设备", "real device", "physical device"])
-    return has_simulator and not has_real_device
+    return mobile_verification_mentions_simulator_only_detail(user_input, task_type)["simulatorOnly"]
+
+
+def detect_brainstorm_questions_detail(user_input: str) -> dict[str, Any]:
+    """Rich model-first variant: seed brainstorm clarification questions plus triage.
+
+    Returns a dict with:
+      questions: list[str] — the thin-wrapper return value.
+      triageSource: always "requires_model_review" — these are only keyword-
+          seeded hints. Whether any of them actually blocks implementation is
+          the Phase 2 model refiner's decision, not a code-deterministic fact.
+      needsModelReview: always True — the model owns the final question set.
+      seededReasons: list[str] — which keyword buckets fired, for auditing.
+      reason: short human-readable description.
+    """
+    questions: list[str] = []
+    seeded_reasons: list[str] = []
+    text = user_input.lower()
+    has_verify = bool(extract_user_verify_command(user_input))
+    task_type = infer_task_type(user_input)
+    if not has_verify and not any(k in text for k in ["\u9a8c\u8bc1", "test", "pytest", "npm test", "\u622a\u56fe", "\u542f\u52a8", "build"]):
+        questions.append("Verification method is unclear: confirm whether to use a script command, platform runner, screenshots/logs, or human acceptance.")
+        seeded_reasons.append("verification_method_unclear")
+    if mobile_task_needs_verification_target_review(user_input, task_type):
+        questions.append(
+            "Mobile verification target is unclear: should AutoMind verify on a real physical device or on a simulator/emulator? "
+            "Recommended: use a real device for device-specific behavior and a simulator/emulator for faster smoke checks when acceptable. Real-device verification may require user authorization such as trusting the computer, enabling Developer Mode/USB debugging, unlocking the device, and approving signing or permission prompts."
+        )
+        seeded_reasons.append("mobile_target_unclear")
+    if any(k in text for k in ["\u4f18\u5316", "\u5b8c\u5584", "\u6539\u8fdb", "\u66f4\u597d"]) and not any(k in text for k in ["\u6307\u6807", "\u6807\u51c6", "\u901a\u8fc7", "\u5931\u8d25"]):
+        questions.append("Success criteria are not specific enough: confirm what should count as pass.")
+        seeded_reasons.append("success_criteria_vague")
+    if any(k in text for k in ["\u767b\u5f55", "\u652f\u4ed8", "\u5220\u9664", "\u4e0a\u4f20", "\u8054\u7f51"]) and "\u6388\u6743" not in text:
+        questions.append("This may involve state changes or external actions: confirm authorization scope and safety boundaries.")
+        seeded_reasons.append("possible_sensitive_action")
+    return {
+        "questions": questions,
+        "triageSource": "requires_model_review",
+        "needsModelReview": True,
+        "seededReasons": seeded_reasons,
+        "reason": "这些只是基于关键词种子化的澄清问题；哪些假设真正阻塞实现由 Phase 2 model refiner 决定。",
+    }
 
 
 def detect_brainstorm_questions(user_input: str) -> list[str]:
@@ -898,23 +1108,11 @@ def detect_brainstorm_questions(user_input: str) -> list[str]:
     Brainstorm is an active design review artifact. This helper only seeds
     likely questions; the Phase 2 model refiner owns the final decision about
     which assumptions block implementation.
+
+    Thin wrapper over detect_brainstorm_questions_detail; callers needing
+    triage metadata should use the _detail variant.
     """
-    questions: list[str] = []
-    text = user_input.lower()
-    has_verify = bool(extract_user_verify_command(user_input))
-    task_type = infer_task_type(user_input)
-    if not has_verify and not any(k in text for k in ["\u9a8c\u8bc1", "test", "pytest", "npm test", "\u622a\u56fe", "\u542f\u52a8", "build"]):
-        questions.append("Verification method is unclear: confirm whether to use a script command, platform runner, screenshots/logs, or human acceptance.")
-    if mobile_task_needs_verification_target_review(user_input, task_type):
-        questions.append(
-            "Mobile verification target is unclear: should AutoMind verify on a real physical device or on a simulator/emulator? "
-            "Recommended: use a real device for device-specific behavior and a simulator/emulator for faster smoke checks when acceptable. Real-device verification may require user authorization such as trusting the computer, enabling Developer Mode/USB debugging, unlocking the device, and approving signing or permission prompts."
-        )
-    if any(k in text for k in ["\u4f18\u5316", "\u5b8c\u5584", "\u6539\u8fdb", "\u66f4\u597d"]) and not any(k in text for k in ["\u6307\u6807", "\u6807\u51c6", "\u901a\u8fc7", "\u5931\u8d25"]):
-        questions.append("Success criteria are not specific enough: confirm what should count as pass.")
-    if any(k in text for k in ["\u767b\u5f55", "\u652f\u4ed8", "\u5220\u9664", "\u4e0a\u4f20", "\u8054\u7f51"]) and "\u6388\u6743" not in text:
-        questions.append("This may involve state changes or external actions: confirm authorization scope and safety boundaries.")
-    return questions
+    return detect_brainstorm_questions_detail(user_input)["questions"]
 
 
 def build_pre_implementation_review_state(user_input: str, questions: list[str] | None = None, *, scaffold_mode: bool = False) -> dict:
@@ -1736,70 +1934,215 @@ def generate_requirements_md(task_dir: Path, user_input: str) -> str:
     log(f"Requirements.md generated: {requirements_path}")
     return str(requirements_path)
 
-def infer_task_type(user_input: str) -> str:
-    """\u6839\u636e\u7528\u6237\u8f93\u5165\u63a8\u65adTask type"""
-    text = user_input.lower()
-    dual_keywords = ["\u53cc\u7aef", "ios\u548candroid", "ios/android", "android\u548cios", "\u5b89\u5353\u548cios", "ios\u548c\u5b89\u5353", "cross-platform", "\u8de8\u5e73\u53f0"]
-    ios_keywords = ["ios", "swift", "iphone", "ipad", "\u82f9\u679c\u771f\u673a", "\u82f9\u679c\u624b\u673a"]
-    android_keywords = ["android", "\u5b89\u5353", "kotlin", "apk", "adb", "\u5b89\u5353\u771f\u673a", "android\u771f\u673a"]
+def infer_task_type_detail(user_input: str) -> dict[str, Any]:
+    """Rich model-first variant: determine task type with triage metadata.
+
+    Returns a dict with:
+      taskType: "ios" | "android" | "dual" | "script"
+      triageSource: "code_deterministic" when explicit platform keywords
+          matched or workspace has a single unambiguous platform.
+          "requires_model_review" when only weak signals exist.
+      needsModelReview: True iff the caller should re-examine before committing.
+      matchedKeyword: the concrete signal bucket that fired.
+      reason: short human-readable description.
+    """
+    text = (user_input or "").lower()
+    dual_keywords = [
+        "双端", "ios和android", "ios/android", "android和ios",
+        "安卓和ios", "ios和安卓", "cross-platform", "跨平台",
+    ]
+    ios_keywords = ["ios", "swift", "iphone", "ipad", "苹果真机", "苹果手机"]
+    android_keywords = [
+        "android", "安卓", "kotlin", "apk", "adb", "安卓真机", "android真机",
+    ]
     if any(k in text for k in dual_keywords):
-        return "dual"
+        return {
+            "taskType": "dual", "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "dual_explicit",
+            "reason": "用户明确提到双端或跨平台。",
+        }
     if any(k in text for k in ios_keywords):
-        return "ios"
+        return {
+            "taskType": "ios", "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "ios_explicit",
+            "reason": "用户明确提到 iOS/苹果设备。",
+        }
     if any(k in text for k in android_keywords):
-        return "android"
+        return {
+            "taskType": "android", "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "android_explicit",
+            "reason": "用户明确提到 Android/安卓设备。",
+        }
     workspace_platforms = infer_workspace_client_platforms()
     if workspace_platforms == {"ios"}:
-        return "ios"
+        return {
+            "taskType": "ios", "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "workspace_only_ios",
+            "reason": "无显式平台关键词，但 workspace 全是 iOS。",
+        }
     if workspace_platforms == {"android"}:
-        return "android"
+        return {
+            "taskType": "android", "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "workspace_only_android",
+            "reason": "无显式平台关键词，但 workspace 全是 Android。",
+        }
     if {"ios", "android"}.issubset(workspace_platforms):
-        return "dual"
-    return "script"
+        return {
+            "taskType": "script", "triageSource": "requires_model_review",
+            "needsModelReview": True, "matchedKeyword": "workspace_both_ios_android",
+            "reason": "workspace 同时检出 iOS 与 Android 项目，纯关键词无法决定默认走哪端，模型应再确认。",
+        }
+    weak_client_markers = [
+        "app", "ui", "screen", "page", "frontend", "web", "browser",
+        "mobile", "desktop", "route", "view",
+    ]
+    has_weak = bool(re.search(r"\b(" + "|".join(weak_client_markers) + r")\b", text)) or any(
+        token in (user_input or "") for token in [
+            "页面", "界面", "按钮", "前端", "客户端", "移动端",
+            "浏览器", "屏幕", "路由", "视图", "入口",
+        ]
+    )
+    if has_weak:
+        return {
+            "taskType": "script", "triageSource": "requires_model_review",
+            "needsModelReview": True, "matchedKeyword": "weak_client_signal",
+            "reason": "检出弱客户端/UI关键词但没有明确平台；可能是 client-ui 任务，模型应再确认。",
+        }
+    return {
+        "taskType": "script", "triageSource": "code_deterministic",
+        "needsModelReview": False, "matchedKeyword": "none",
+        "reason": "没有检出平台或客户端相关关键词，默认脚本/后端/通用任务。",
+    }
 
 
+def infer_task_type(user_input: str) -> str:
+    """根据用户输入推断Task type。Thin wrapper; callers needing triage metadata should use infer_task_type_detail."""
+    return infer_task_type_detail(user_input)["taskType"]
+
+
+
+
+def infer_client_ui_task_detail(user_input: str, task_type: str | None = None) -> dict[str, Any]:
+    """Rich model-first variant: decide whether the request describes client/UI-facing work.
+
+    Returns a dict with:
+      isClientUi: bool
+      triageSource: "code_deterministic" when strong keywords fired or explicit
+          negative signal present. "requires_model_review" when ambiguous.
+      needsModelReview: True iff the decision is heuristic enough to re-examine.
+      matchedKeyword: human-readable label for which signal fired.
+      reason: short human-readable description.
+    """
+    raw_task_type = (task_type or infer_task_type(user_input)).lower()
+    has_negative_signal = has_negative_mobile_device_signal(user_input)
+    if raw_task_type in {"ios", "android", "dual"} and not has_negative_signal:
+        return {
+            "isClientUi": True, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "task_type_" + raw_task_type,
+            "reason": "任务类型已明确为客户端任务，且没有负向移动信号。",
+        }
+    lower = (user_input or "").lower()
+    strong_match = re.search(r"\b(app|ui|screen|page|button|frontend|web|browser|desktop|route|view)\b", lower)
+    if strong_match:
+        return {
+            "isClientUi": True, "triageSource": "code_deterministic",
+            "needsModelReview": False,
+            "matchedKeyword": "strong_ui_token:" + strong_match.group(1),
+            "reason": "请求中出现英文强 UI 关键词（app/ui/page/button/web/browser 等）。",
+        }
+    chinese_ui_tokens = [
+        "页面", "界面", "按钮", "前端", "客户端", "移动端", "浏览器",
+        "桌面", "屏幕", "路由", "视图", "入口", "闪退", "崩溃",
+    ]
+    for t in chinese_ui_tokens:
+        if t in (user_input or ""):
+            return {
+                "isClientUi": True, "triageSource": "code_deterministic",
+                "needsModelReview": False, "matchedKeyword": "zh_ui_token:" + t,
+                "reason": f"请求中出现中文 UI/客户端关键词：{t}。",
+            }
+    if has_negative_signal:
+        return {
+            "isClientUi": False, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "negative_mobile_signal",
+            "reason": "请求中明确声明无需移动设备/真机验证。",
+        }
+    return {
+        "isClientUi": False, "triageSource": "requires_model_review",
+        "needsModelReview": True, "matchedKeyword": "ambiguous",
+        "reason": "没有强 UI 关键词，也没有显式否定移动信号；可能是后端/脚本任务，模型应再确认。",
+    }
 
 
 def infer_client_ui_task(user_input: str, task_type: str | None = None) -> bool:
-    """Best-effort generic detection for client/UI-facing work.
+    """Best-effort detection for client/UI-facing work. Thin wrapper over
+    infer_client_ui_task_detail; callers needing triage metadata should use
+    the _detail variant."""
+    return infer_client_ui_task_detail(user_input, task_type)["isClientUi"]
 
-    This intentionally detects broad UI/app concepts only. Product/domain
-    uncertainty should still be resolved by the model Planner from project
-    context, not by business-specific keyword rules.
+
+def infer_ui_entry_target_detail(user_input: str) -> dict[str, Any]:
+    """Rich model-first variant: extract user-mentioned UI entry target with
+    triage metadata.
+
+    Returns a dict with:
+      entryTarget: str — page/screen/route/entry name.
+      triageSource: "code_deterministic" when Chinese phrase, English
+          page/screen phrase, or URL path matched. "requires_model_review"
+          when fallback default produced.
+      needsModelReview: True iff no explicit entry was found — the Planner
+          should look at project context (routes file, navigation tree, etc.)
+      matchedKeyword: which regex bucket fired (or "fallback").
+      reason: short human-readable description.
     """
-    task_type = (task_type or infer_task_type(user_input)).lower()
-    if task_type in {"ios", "android", "dual"} and not has_negative_mobile_device_signal(user_input):
-        return True
-    lower = (user_input or "").lower()
-    if re.search(r"\b(app|ui|screen|page|button|frontend|web|browser|desktop|route|view)\b", lower):
-        return True
-    return any(token in (user_input or "") for token in [
-        "页面", "界面", "按钮", "前端", "客户端", "移动端", "浏览器", "桌面", "屏幕", "路由", "视图", "入口", "闪退", "崩溃",
-    ])
-
-
-def infer_ui_entry_target(user_input: str) -> str:
-    """Extract a user-mentioned UI entry target without inventing a product flow."""
     text = (user_input or "").strip()
-    chinese_match = re.search(r"([\u4e00-\u9fffA-Za-z0-9_/-]{1,24}(?:页|页面|界面|屏幕|路由|入口|视图))", text)
+    chinese_match = re.search(
+        r"([\u4e00-\u9fffA-Za-z0-9_/-]{1,24}(?:页|页面|界面|屏幕|路由|入口|视图))",
+        text,
+    )
     if chinese_match:
         candidate = chinese_match.group(1)
-        for prefix in ["修复", "实现", "新增", "修改", "检查", "验证", "打开", "启动", "进入", "定位", "测试", "构建"]:
+        for prefix in [
+            "修复", "实现", "新增", "修改", "检查", "验证", "打开", "启动",
+            "进入", "定位", "测试", "构建",
+        ]:
             if candidate.startswith(prefix) and len(candidate) > len(prefix) + 1:
                 candidate = candidate[len(prefix):]
                 break
-        return candidate
+        return {
+            "entryTarget": candidate, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "chinese_entry",
+            "reason": f"从请求中抽取到明确的中文 UI 入口：{candidate}。",
+        }
     english_match = re.search(
         r"\b([A-Za-z0-9_/-]{1,30}(?:\s+[A-Za-z0-9_/-]{1,30}){0,2}\s+(?:page|screen|route|view|entry|activity))\b",
-        text,
-        flags=re.IGNORECASE,
+        text, flags=re.IGNORECASE,
     )
     if english_match:
-        return english_match.group(1).strip()
+        target = english_match.group(1).strip()
+        return {
+            "entryTarget": target, "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "english_entry",
+            "reason": f"从请求中抽取到明确的英文 UI 入口：{target}。",
+        }
     route_match = re.search(r"(?<!\w)(/[A-Za-z0-9_./:-]+)", text)
     if route_match:
-        return route_match.group(1)
-    return "the target page/screen/route/activity/state identified from the request or project context"
+        return {
+            "entryTarget": route_match.group(1), "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "path_route",
+            "reason": f"从请求中抽取到明确的路径/路由：{route_match.group(1)}。",
+        }
+    return {
+        "entryTarget": "the target page/screen/route/activity/state identified from the request or project context",
+        "triageSource": "requires_model_review",
+        "needsModelReview": True, "matchedKeyword": "fallback",
+        "reason": "请求中没有明确提到页面/屏幕/路由/入口等关键词，应由模型或项目路由文件推断。",
+    }
+
+
+def infer_ui_entry_target(user_input: str) -> str:
+    """Extract user-mentioned UI entry target without inventing a product flow. Thin wrapper over infer_ui_entry_target_detail; callers needing triage should use the _detail variant."""
+    return infer_ui_entry_target_detail(user_input)["entryTarget"]
 
 
 
@@ -2650,8 +2993,21 @@ def _first_failed_check_category(evaluation: dict) -> str:
     return "unknown"
 
 
-def classify_agent_execution_failure(output: str) -> str:
-    """Classify failures from an external agent CLI invocation."""
+def classify_agent_execution_failure_detail(output: str) -> dict[str, Any]:
+    """Rich model-first variant: classify an external agent CLI failure.
+
+    Returns a dict with:
+      category: str — the thin-wrapper return value
+          (agent_context_overflow / agent_stalled_no_output / agent_timeout /
+          agent_unavailable).
+      triageSource: "code_deterministic" when a specific terminal signal
+          matched. "requires_model_review" for the catch-all
+          ``agent_unavailable`` fallback, which is "no known pattern matched"
+          rather than a positively identified unavailability.
+      needsModelReview: True iff the fallback fired.
+      matchedKeyword: which signal bucket fired.
+      reason: short human-readable description.
+    """
     text = (output or "").lower()
     if (
         "ran out of room in the model's context window" in text
@@ -2661,12 +3017,35 @@ def classify_agent_execution_failure(output: str) -> str:
         or "maximum context length" in text
         or "input is too long" in text and "context" in text
     ):
-        return "agent_context_overflow"
+        return {
+            "category": "agent_context_overflow", "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "context_overflow",
+            "reason": "命中明确的上下文窗口耗尽信号。",
+        }
     if "agent stalled with no output" in text or "agent idle timeout" in text or "stalled_no_output" in text:
-        return "agent_stalled_no_output"
+        return {
+            "category": "agent_stalled_no_output", "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "stalled_no_output",
+            "reason": "命中明确的 agent 无输出停滞信号。",
+        }
     if "command timeout" in text or "timed out" in text or "timeout after" in text:
-        return "agent_timeout"
-    return "agent_unavailable"
+        return {
+            "category": "agent_timeout", "triageSource": "code_deterministic",
+            "needsModelReview": False, "matchedKeyword": "timeout",
+            "reason": "命中明确的超时信号。",
+        }
+    return {
+        "category": "agent_unavailable", "triageSource": "requires_model_review",
+        "needsModelReview": True, "matchedKeyword": "fallback",
+        "reason": "没有命中任何已知终端信号，兜底归类为 agent_unavailable；不同 CLI 措辞各异，模型应复核输出确认真实失败原因（是否其实是超时/上下文溢出/产品错误）。",
+    }
+
+
+def classify_agent_execution_failure(output: str) -> str:
+    """Classify failures from an external agent CLI invocation. Thin wrapper over
+    classify_agent_execution_failure_detail; callers needing triage metadata
+    should use the _detail variant."""
+    return classify_agent_execution_failure_detail(output)["category"]
 
 
 def _read_failure_log_tail(path: Path, limit: int = 128_000) -> str:
@@ -3258,17 +3637,68 @@ def add_test_results_from_declared_cases(
     )
 
 
-def classify_android_probe_failure(reason: str) -> tuple[str, str]:
+def classify_android_probe_failure_detail(reason: str) -> dict[str, Any]:
+    """Rich model-first variant: classify an Android probe-flow failure reason.
+
+    Returns a dict with:
+      category: str — the thin-wrapper's first tuple element.
+      message: str — the thin-wrapper's second tuple element.
+      triageSource: "code_deterministic" when a specific signature matched.
+          "requires_model_review" for the catch-all ``validation_failure``
+          fallback, which routes to the product-defect path; misrouting an
+          unrecognized infra/env reason there is a high-risk default.
+      needsModelReview: True iff the fallback fired.
+      matchedKeyword: which signature bucket fired.
+      reason: short human-readable description (distinct from input ``reason``).
+    """
     lower = (reason or "").lower()
     if "blocked_sensitive" in lower or "sensitive overlay" in lower or "requires authorization" in lower:
-        return "permission_blocked", "UI overlay requires explicit authorization; auto-unblock is limited to safe dismiss/close actions."
+        return {
+            "category": "permission_blocked",
+            "message": "UI overlay requires explicit authorization; auto-unblock is limited to safe dismiss/close actions.",
+            "triageSource": "code_deterministic", "needsModelReview": False,
+            "matchedKeyword": "blocked_sensitive",
+            "reason": "命中敏感弹窗/需要授权信号。",
+        }
     if "install_failed_update_incompatible" in lower or "signatures do not match" in lower:
-        return "environment_blocked", "Android install blocked: same package is already installed with a different signature."
+        return {
+            "category": "environment_blocked",
+            "message": "Android install blocked: same package is already installed with a different signature.",
+            "triageSource": "code_deterministic", "needsModelReview": False,
+            "matchedKeyword": "signature_mismatch",
+            "reason": "命中安装签名不匹配信号。",
+        }
     if "can't find any android device" in lower or "no devices" in lower or "device offline" in lower:
-        return "system_or_external_dependency", "Android device/emulator is unavailable or offline."
+        return {
+            "category": "system_or_external_dependency",
+            "message": "Android device/emulator is unavailable or offline.",
+            "triageSource": "code_deterministic", "needsModelReview": False,
+            "matchedKeyword": "device_unavailable",
+            "reason": "命中设备不可用/离线信号。",
+        }
     if "permission denied" in lower or "not authorized" in lower or "unauthorized" in lower:
-        return "permission_blocked", "Android device permission/authorization blocked verification."
-    return "validation_failure", reason or "probe-flow step failed"
+        return {
+            "category": "permission_blocked",
+            "message": "Android device permission/authorization blocked verification.",
+            "triageSource": "code_deterministic", "needsModelReview": False,
+            "matchedKeyword": "permission_denied",
+            "reason": "命中权限/授权拒绝信号。",
+        }
+    return {
+        "category": "validation_failure",
+        "message": reason or "probe-flow step failed",
+        "triageSource": "requires_model_review", "needsModelReview": True,
+        "matchedKeyword": "fallback",
+        "reason": "没有命中任何已知签名，兜底归类为 validation_failure（=产品缺陷路径）；这是高风险默认，模型应复核原始 reason 确认是否其实是环境/设备/权限类问题而非产品缺陷。",
+    }
+
+
+def classify_android_probe_failure(reason: str) -> tuple[str, str]:
+    """Classify an Android probe-flow failure reason into (category, message).
+    Thin wrapper over classify_android_probe_failure_detail; callers needing
+    triage metadata should use the _detail variant."""
+    detail = classify_android_probe_failure_detail(reason)
+    return detail["category"], detail["message"]
 
 
 def infer_probe_target_testcases(task_dir: Path, summary: dict) -> list[str]:
@@ -3420,13 +3850,20 @@ def probe_summary_to_evaluation(summary: dict, iteration: int, summary_path: Pat
     for item in summary.get("checks", []):
         if isinstance(item, dict) and not item.get("ok"):
             raw_reason = item.get("detail", "probe-flow step failed")
-            category, normalized_reason = classify_android_probe_failure(str(raw_reason))
+            triage = classify_android_probe_failure_detail(str(raw_reason))
             failed_checks.append({
                 "name": item.get("name", "probe_flow_step"),
-                "reason": normalized_reason,
+                "reason": triage["message"],
                 "rawReason": raw_reason,
-                "category": category,
+                "category": triage["category"],
                 "evidence": item.get("evidence") or str(summary_path),
+                # Model-first triage: surface whether code confidently classified
+                # this failure (code_deterministic) or fell back to the generic
+                # validation_failure default (requires_model_review). The isolated
+                # Evaluator reads evaluation.json and must re-examine rawReason
+                # itself instead of trusting a blind fallback category.
+                "triageSource": triage["triageSource"],
+                "needsModelReview": triage["needsModelReview"],
             })
 
     overlay = summary.get("uiUnblock") if isinstance(summary.get("uiUnblock"), dict) else {}
@@ -3629,6 +4066,57 @@ def extract_script_command(task_dir: Path) -> tuple[str | None, list[str]]:
     return None, warnings
 
 
+def script_command_no_screenshot_reason(tc: dict) -> str | None:
+    """Return a noScreenshotReason for non-UI script-command testcases.
+
+    Completion requires screenshot evidence for runtime/device UI flows by
+    default. A generic script-command verifier may still declare
+    runtime/static-runtime level because it executes code, but when the testcase
+    surface is command/log/API/file based and does not ask for screenshot/UI
+    evidence, the correct artifact is an explicit noScreenshotReason plus
+    machine-checkable command evidence.
+    """
+    testcase_type = str(tc.get("type") or "").lower()
+    source = " ".join(
+        str(tc.get(key) or "")
+        for key in ["preconditions", "command", "steps", "expectedEvidence", "source"]
+    ).lower()
+    text = f"{testcase_type} {source}"
+    ui_substrings = [
+        "app/ui",
+        "screen",
+        "page",
+        "visual",
+        "screenshot",
+        "xcresult",
+        "hierarchy",
+        "browser",
+        "playwright",
+        "tap",
+        "click",
+        "swipe",
+        "xctest",
+        "xcuitest",
+        "uiautomator",
+        "截图",
+        "页面",
+        "界面",
+        "视觉",
+        "点击",
+    ]
+    ui_word_patterns = [
+        r"\bui\b",
+        r"\bdom\b",
+    ]
+    if any(token in text for token in ui_substrings) or any(re.search(pattern, text) for pattern in ui_word_patterns):
+        return None
+    return (
+        "No screenshot captured because this script-command testcase verifies a "
+        "non-UI command/log/API/file surface; command log, env snapshot, exit "
+        "code, and hardMetrics are the machine-checkable evidence."
+    )
+
+
 def run_script_command_evaluator(task_dir: Path, iteration: int, iter_log_dir: Path) -> tuple[int, str]:
     """Run a project-agnostic verification command and emit evaluation.json.
 
@@ -3687,7 +4175,8 @@ def run_script_command_evaluator(task_dir: Path, iteration: int, iter_log_dir: P
         rows: list[dict] = []
         for tc in declared_testcases:
             if tc.get("required"):
-                rows.append({
+                no_screenshot_reason = script_command_no_screenshot_reason(tc)
+                row = {
                     "testCaseId": tc["id"],
                     "result": "pass" if command_passed else "fail",
                     "required": True,
@@ -3711,6 +4200,11 @@ def run_script_command_evaluator(task_dir: Path, iteration: int, iter_log_dir: P
                             }
                         ],
                     },
+                }
+                if no_screenshot_reason:
+                    row["noScreenshotReason"] = no_screenshot_reason
+                rows.append({
+                    **row,
                 })
             else:
                 rows.append({
@@ -4083,36 +4577,65 @@ def attempt_android_probe_flow_self_repair(task_dir: Path, dry_run: bool = False
     return True, latest, output
 
 
-def should_try_platform_self_repair(task_dir: Path, evaluation: dict) -> bool:
-    """Conservative gate for platform-level flow repair.
+def should_try_platform_self_repair_detail(task_dir: Path, evaluation: dict) -> dict[str, Any]:
+    """Rich model-first variant: decide whether to try platform-level self-repair
+    before escalating back to the Generator.
 
-    AutoMind should repair the verifier/probe-flow only when the current
-    failure is still in the evaluator lane. Product-code/build/install
-    failures should continue to Generator or human decision.
+    Returns a dict with:
+      shouldTry: bool — the thin-wrapper return value.
+      triageSource: "code_deterministic" only when the decision is a hard no.
+          Otherwise "requires_model_review" because absence of a blocker is
+          heuristic, not proof that repair will help.
+      needsModelReview: True iff the positive "go ahead" is heuristic and should
+          be re-examined by the Evaluator before acting.
+      blockersFound: list of concrete blocked categories that fired.
+      reason: short human-readable description.
     """
     if not is_android_probe_flow_task(task_dir):
-        return False
+        return {
+            "shouldTry": False, "triageSource": "code_deterministic",
+            "needsModelReview": False, "blockersFound": [],
+            "reason": "当前任务不是 Android probe-flow 任务，没有可执行的平台自我修复路径。",
+        }
     if evaluation.get("result") != "fail" or evaluation.get("nextAction") != "retry_generator":
-        return False
+        return {
+            "shouldTry": False, "triageSource": "code_deterministic",
+            "needsModelReview": False, "blockersFound": [],
+            "reason": "当前评估结果不是 fail + retry_generator，无需走平台自我修复路径。",
+        }
     failed = evaluation.get("failedChecks", [])
     if not isinstance(failed, list):
-        return False
+        return {
+            "shouldTry": False, "triageSource": "code_deterministic",
+            "needsModelReview": False, "blockersFound": [],
+            "reason": "评估中 failedChecks 字段不是列表（结构异常），拒绝在结构不清时做修复。",
+        }
     blocked_categories = {
-        "build_failure",
-        "install_failure",
-        "agent_unavailable",
-        "permission_blocked",
-        "mobile_device_unavailable",
-        "tool_missing",
+        "build_failure", "install_failure", "agent_unavailable",
+        "permission_blocked", "mobile_device_unavailable", "tool_missing",
     }
+    found_blockers: list[str] = []
     for check in failed:
         if isinstance(check, dict) and check.get("category") in blocked_categories:
-            return False
-    return True
+            found_blockers.append(check.get("category", ""))
+    if found_blockers:
+        return {
+            "shouldTry": False, "triageSource": "code_deterministic",
+            "needsModelReview": False, "blockersFound": found_blockers,
+            "reason": f"检测到产品级/基础设施级失败类别：{found_blockers}，自我修复无效，应交由 Generator 或人工处理。",
+        }
+    return {
+        "shouldTry": True, "triageSource": "requires_model_review",
+        "needsModelReview": True, "blockersFound": [],
+        "reason": "没有检测到硬拦截类别，但这只是启发式判断，模型应重新检查失败条目，确认是否确实是 probe-flow 层面问题。",
+    }
 
-# ============================================================
-# Agent \u6267\u884c
-# ============================================================
+
+def should_try_platform_self_repair(task_dir: Path, evaluation: dict) -> bool:
+    """Conservative gate for platform-level flow repair. Thin wrapper over
+    should_try_platform_self_repair_detail; callers needing triage should use
+    the _detail variant."""
+    return should_try_platform_self_repair_detail(task_dir, evaluation)["shouldTry"]
 
 
 

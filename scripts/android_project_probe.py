@@ -104,7 +104,7 @@ def classify_build(output: str, exit_code: int) -> dict[str, Any]:
             if dep not in missing:
                 missing.append(dep)
     if exit_code == 0:
-        return {"result": "pass", "category": "validation_failure", "detail": "ok", "summary": "build command passed"}
+        return {"result": "pass", "category": "validation_failure", "detail": "ok", "summary": "build command passed", "triageSource": "code_deterministic", "needsModelReview": False}
     if "offline mode" in lower and ("no cached version" in lower or "could not download" in lower):
         return {
             "result": "blocked",
@@ -112,10 +112,19 @@ def classify_build(output: str, exit_code: int) -> dict[str, Any]:
             "detail": "dependency_cache_missing",
             "summary": "Gradle offline build is blocked by missing cached dependencies",
             "missingDependencies": missing[:80],
+            "triageSource": "code_deterministic",
+            "needsModelReview": False,
         }
     if "task not found" in lower or "cannot locate tasks" in lower:
-        return {"result": "blocked", "category": "needs_replan", "detail": "build_task_not_found", "summary": "requested Gradle task does not exist"}
-    return {"result": "fail", "category": "build_failure", "summary": "build command failed"}
+        return {"result": "blocked", "category": "needs_replan", "detail": "build_task_not_found", "summary": "requested Gradle task does not exist", "triageSource": "code_deterministic", "needsModelReview": False}
+    return {
+        "result": "fail",
+        "category": "build_failure",
+        "summary": "build command failed",
+        "triageSource": "requires_model_review",
+        "needsModelReview": True,
+        "detail": "no deterministic Gradle signature matched; the evaluator should read the raw build log and classify the real cause (dependency/tooling/product-code/signing) instead of trusting the generic build_failure default",
+    }
 
 
 def parse_gradle_tasks(text: str) -> list[str]:
@@ -193,8 +202,23 @@ def main() -> int:
         result["gradleTasksRun"] = task_run
 
     if args.build_command:
-        gate = run_shell(args.build_command, root, args.timeout)
-        gate["classification"] = classify_build(gate.get("stdoutTail", "") + "\n" + gate.get("stderrTail", ""), gate["exitCode"])
+        gate = run_shell(args.build_command, root, args.timeout, keep_stdout_for_parse=True)
+        full_stdout = gate.pop("_stdoutForParse", "")
+        full_stderr = gate.pop("_stderrForParse", "")
+        # Persist the complete (untruncated) build output next to the JSON so the
+        # evaluator can read the real cause even when it falls outside the 8000
+        # char stdoutTail/stderrTail kept in this JSON.
+        full_log = out.parent / "android-project-probe-build.log"
+        try:
+            full_log.parent.mkdir(parents=True, exist_ok=True)
+            full_log.write_text(
+                redact_sensitive_text(full_stdout) + "\n----- STDERR -----\n" + redact_sensitive_text(full_stderr),
+                errors="ignore",
+            )
+            gate["fullBuildLog"] = rel(root, full_log) if str(full_log).startswith(str(root)) else str(full_log)
+        except Exception:
+            gate["fullBuildLog"] = ""
+        gate["classification"] = classify_build(full_stdout + "\n" + full_stderr, gate["exitCode"])
         result["buildGate"] = gate
 
     if result["apkOutputs"]:

@@ -32,6 +32,71 @@ STRUCTURED_KEY_LINE_RE = re.compile(
 
 
 
+def _collect_model_review_signals(evaluation: dict | None) -> list[dict]:
+    """Scan evaluation.json for entries carrying needsModelReview=True.
+
+    Returns a flat list of attention-signal dicts ready to render in a
+    context pack. The Evaluator/Generator prompt templates tell the model
+    that these entries require its analysis rather than code-only
+    classification.
+    """
+    if not evaluation:
+        return []
+
+    signals: list[dict] = []
+
+    def _needs_review(entry: dict) -> bool:
+        val = entry.get("needsModelReview")
+        return val is True
+
+    # qualityChecks[] entries carry triageSource/needsModelReview (see
+    # scripts/quality_evaluator.py).
+    quality = evaluation.get("qualityChecks")
+    if isinstance(quality, list):
+        for idx, entry in enumerate(quality):
+            if isinstance(entry, dict) and _needs_review(entry):
+                signals.append({
+                    "source": f"qualityChecks[{idx}]",
+                    "triageSource": entry.get("triageSource", "requires_model_review"),
+                    "id": entry.get("id"),
+                    "result": entry.get("result"),
+                    "failureClass": entry.get("failureClass") or entry.get("category"),
+                    "evidence": entry.get("evidence"),
+                    "reason": str(entry.get("reason", ""))[:240],
+                })
+
+    # failedChecks[] may carry needsModelReview from orchestrator helpers
+    # (classify_agent_execution_failure, classify_android_probe_failure,
+    # or Evaluator-written entries with triageSource=requires_model_review).
+    failed = evaluation.get("failedChecks")
+    if isinstance(failed, list):
+        for idx, entry in enumerate(failed):
+            if isinstance(entry, dict) and _needs_review(entry):
+                signals.append({
+                    "source": f"failedChecks[{idx}]",
+                    "triageSource": entry.get("triageSource", "requires_model_review"),
+                    "name": entry.get("name"),
+                    "category": entry.get("category"),
+                    "recoveryAction": (str(entry.get("recoveryAction", ""))[:200] if entry.get("recoveryAction") else None),
+                    "reason": str(entry.get("reason", ""))[:240],
+                    "evidence": entry.get("evidence"),
+                })
+
+    # Top-level modelReviewSignals (if the orchestrator wrote them)
+    signals_block = evaluation.get("modelReviewSignals")
+    if isinstance(signals_block, dict):
+        review_list = signals_block.get("signals")
+        if isinstance(review_list, list):
+            for entry in review_list:
+                if isinstance(entry, dict):
+                    signals.append({
+                        "source": "modelReviewSignals",
+                        **{k: str(v)[:240] if isinstance(v, str) else v for k, v in entry.items()},
+                    })
+
+    return signals
+
+
 def _bytes_len(text: str) -> int:
     return len(text.encode("utf-8", errors="ignore"))
 
@@ -332,6 +397,47 @@ def build_generator_context_pack(task_dir: Path, iteration: int, iter_log_dir: P
         "- Prefer evaluation/runtime-state/Validation/Delivery and digest summaries; use targeted grep/tail for large raw logs.",
         "- Do not read oversized raw logs or build intermediates wholesale by default.",
         "",
+    ])
+    # Render model-review attention signals so the next model iteration
+    # sees explicit "these need YOUR analysis" cues before it starts
+    # coding/retrying. The code-only classifiers above do NOT make
+    # final decisions on these entries.
+    review_signals = _collect_model_review_signals(read_evaluation_json(task_dir))
+
+    md_parts.extend([
+        "",
+        "## Model-Review Attention Signals",
+        f"- Signals found: `{len(review_signals)}`",
+    ])
+    if review_signals:
+        md_parts.append(
+            "- ATTENTION: These entries were NOT classified by deterministic code patterns. "
+            "You MUST re-read the raw evidence at the referenced path and re-triage each signal "
+            "before editing code or retrying the failed command. Do not skip re-analysis."
+        )
+        for signal in review_signals[:20]:
+            source = signal.get("source", "unknown")
+            triage = signal.get("triageSource", "requires_model_review")
+            evidence = signal.get("evidence") or "see evaluation.json excerpt"
+            reason = signal.get("reason") or ""
+            extras = []
+            for k in ("id", "name", "result", "category", "failureClass", "recoveryAction"):
+                v = signal.get(k)
+                if v:
+                    extras.append(f"{k}={v}")
+            md_parts.append(
+                f"  - [{source}] triageSource=`{triage}` evidence=`{evidence}` :: "
+                + "; ".join(extras)
+                + (f" :: {reason}" if reason else "")
+            )
+    else:
+        md_parts.append(
+            "- No deferred signals: every structured entry in the previous round's evaluation.json "
+            "was classified by a deterministic pattern or a prior model review. You may act directly "
+            "on the classified categories and recovery actions."
+        )
+    md_parts.extend([
+        "",
         "## Required Files",
     ])
     for path in pack["policy"]["requiredFiles"]:
@@ -586,6 +692,48 @@ def build_evaluator_context_pack(task_dir: Path, iteration: int, iter_log_dir: P
         "- Task artifacts are embedded as bounded excerpts in this markdown; `evaluator-context.json` is machine/audit metadata and intentionally omits source file content.",
         "- Read raw files only when needed for a concrete verification decision.",
         f"- Read `{rel_to_root(iter_log_dir / 'log-digest.md')}` before any raw log; use targeted grep/tail for large logs.",
+        "",
+    ])
+    # Render model-review attention signals for the Evaluator. The code
+    # did not claim these — the Evaluator MUST analyze them to decide
+    # severity/recovery. The prompt template reinforces this rule.
+    eval_review_signals = _collect_model_review_signals(read_evaluation_json(task_dir))
+
+    md_parts.extend([
+        "",
+        "## Model-Review Attention Signals",
+        f"- Signals found: `{len(eval_review_signals)}`",
+    ])
+    if eval_review_signals:
+        md_parts.append(
+            "- ATTENTION: These entries were left unclassified by deterministic code patterns. "
+            "You MUST read the raw evidence and re-triage each one — setting "
+            "`triageSource: model_reviewed`, `needsModelReview: false`, a concrete `category`, "
+            "and a concrete `recoveryAction` (or, if appropriate, marking it as dismissed). "
+            "Do not leave any entry with `needsModelReview: true` in your output."
+        )
+        for signal in eval_review_signals[:20]:
+            source = signal.get("source", "unknown")
+            triage = signal.get("triageSource", "requires_model_review")
+            evidence = signal.get("evidence") or "see evaluation.json excerpt"
+            reason = signal.get("reason") or ""
+            extras = []
+            for k in ("id", "name", "result", "category", "failureClass", "recoveryAction"):
+                v = signal.get(k)
+                if v:
+                    extras.append(f"{k}={v}")
+            md_parts.append(
+                f"  - [{source}] triageSource=`{triage}` evidence=`{evidence}` :: "
+                + "; ".join(extras)
+                + (f" :: {reason}" if reason else "")
+            )
+    else:
+        md_parts.append(
+            "- No deferred signals: all structured entries in the previous round's evaluation.json "
+            "were classified by deterministic patterns or a prior model review. You may focus on "
+            "verifying current test cases and production-quality evidence."
+        )
+    md_parts.extend([
         "",
         "## Capability Surface",
         f"- Principle: {pack['capabilitySurface']['principle']}",

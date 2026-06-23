@@ -264,6 +264,11 @@ def classify_crash_timeout_quality(text: str, log_dir: pathlib.Path, task_dir: p
     warning that asks Evaluator to collect stack/page evidence before treating it
     as product failure. A timeout is hard only for product-visible hangs; verifier
     or generic network/syslog timeouts are warnings.
+
+    Every returned check carries a ``triageSource`` field so callers can tell apart
+    code-deterministic classifications (hard, well-proven patterns) from weak
+    signals (``requires_model_review``) where the Evaluator must re-read the log
+    before deciding the failure severity.
     """
     checks: list[dict] = []
     crash_excerpts = _matching_excerpts(text, CRASH_SIGNAL_RE)
@@ -290,6 +295,8 @@ def classify_crash_timeout_quality(text: str, log_dir: pathlib.Path, task_dir: p
                 "failureClass": "product_crash_with_stack",
                 "reason": "Structured product crash evidence found with stack/page context; record stack/page and route to repair if reproducible.",
                 "evidence": evidence,
+                "triageSource": "code_deterministic",
+                "needsModelReview": False,
                 "diagnostic": {"scope": hard_scope, "hasStack": True, "hasPage": True, "excerpt": hard_excerpt},
             })
         else:
@@ -302,6 +309,8 @@ def classify_crash_timeout_quality(text: str, log_dir: pathlib.Path, task_dir: p
                 "failureClass": "crash_signal_needs_stack",
                 "reason": "Crash-like keyword found, but not enough current product stack/page evidence to treat as a hard failure. Collect crash stack and occurred page if stable/reproducible.",
                 "evidence": evidence,
+                "triageSource": "requires_model_review",
+                "needsModelReview": True,
                 "diagnostic": {
                     "scope": scope,
                     "hasStack": bool(CRASH_STACK_RE.search(excerpt)),
@@ -327,7 +336,9 @@ def classify_crash_timeout_quality(text: str, log_dir: pathlib.Path, task_dir: p
                 "failureClass": "product_timeout_or_hang",
                 "reason": "Product-visible timeout/hang evidence found; record page/state and route to repair if reproducible.",
                 "evidence": evidence,
-                "diagnostic": {"scope": "runtime_log", "excerpt": hang_excerpt},
+                "triageSource": "code_deterministic",
+                "needsModelReview": False,
+                "diagnostic": {"scope": scope, "excerpt": hang_excerpt},
             })
         else:
             excerpt = timeout_excerpts[0]
@@ -339,6 +350,8 @@ def classify_crash_timeout_quality(text: str, log_dir: pathlib.Path, task_dir: p
                 "failureClass": "automation_or_system_timeout_signal",
                 "reason": "Timeout-like keyword found in verifier/system/network/control evidence; treat as automation/runtime-path signal, not product quality failure unless reproduced with page/state evidence.",
                 "evidence": evidence,
+                "triageSource": "requires_model_review",
+                "needsModelReview": True,
                 "diagnostic": {"scope": scope, "excerpt": excerpt},
             })
     return checks
@@ -408,6 +421,8 @@ def quality_checks(root: pathlib.Path, task_dir: pathlib.Path, log_dir: pathlib.
             "qualityCategory": case.get("category", "other"),
             "result": "pass",
             "reason": f"Quality testcase declared: {case['kind']} / {case['method']}",
+            "triageSource": "code_deterministic",
+            "needsModelReview": False,
         })
 
     durations = extract_durations(text)
@@ -422,6 +437,8 @@ def quality_checks(root: pathlib.Path, task_dir: pathlib.Path, log_dir: pathlib.
             "unit": "ms",
             "reason": "Captured duration_ms-like evidence; warn only when over a lenient 5s heuristic without baseline.",
             "evidence": str(log_dir.relative_to(task_dir)) if log_dir.exists() else "task evidence",
+            "triageSource": "requires_model_review",
+            "needsModelReview": True,
         })
     else:
         checks.append({
@@ -430,6 +447,8 @@ def quality_checks(root: pathlib.Path, task_dir: pathlib.Path, log_dir: pathlib.
             "result": "warn",
             "failureClass": "performance_metric_missing",
             "reason": "No duration_ms-like metric found. V1 warns instead of failing because many tasks lack performance instrumentation.",
+            "triageSource": "requires_model_review",
+            "needsModelReview": True,
         })
 
     checks.extend(classify_crash_timeout_quality(text, log_dir, task_dir))
@@ -443,6 +462,8 @@ def quality_checks(root: pathlib.Path, task_dir: pathlib.Path, log_dir: pathlib.
                 "failureClass": "product_stuck_loading",
                 "reason": f"Hard quality failure pattern detected: {check_id}",
                 "evidence": str(log_dir.relative_to(task_dir)) if log_dir.exists() else "task evidence",
+                "triageSource": "code_deterministic",
+                "needsModelReview": False,
             })
 
     for check_id, pattern in WARN_PATTERNS:
@@ -453,6 +474,8 @@ def quality_checks(root: pathlib.Path, task_dir: pathlib.Path, log_dir: pathlib.
                 "result": "warn",
                 "reason": f"Soft quality signal detected: {check_id}",
                 "evidence": str(log_dir.relative_to(task_dir)) if log_dir.exists() else "task evidence",
+                "triageSource": "requires_model_review",
+                "needsModelReview": True,
             })
 
     diff_names = run_git(root, ["diff", "--name-only"])
@@ -466,6 +489,8 @@ def quality_checks(root: pathlib.Path, task_dir: pathlib.Path, log_dir: pathlib.
             "actual": len(changed_files),
             "reason": "Changed file count is a lightweight architecture scope signal; V1 only warns on broad diffs.",
             "evidence": "git diff --name-only",
+            "triageSource": "code_deterministic",
+            "needsModelReview": False,
         })
         diff_text = run_git(root, ["diff", "--", *changed_files[:80]])
         for check_id, pattern in ARCH_WARN_PATTERNS:
@@ -476,6 +501,8 @@ def quality_checks(root: pathlib.Path, task_dir: pathlib.Path, log_dir: pathlib.
                     "result": "warn",
                     "reason": f"Heuristic architecture/maintainability signal detected: {check_id}",
                     "evidence": "git diff",
+                    "triageSource": "requires_model_review",
+                    "needsModelReview": True,
                 })
     else:
         checks.append({
@@ -484,6 +511,8 @@ def quality_checks(root: pathlib.Path, task_dir: pathlib.Path, log_dir: pathlib.
             "result": "pass",
             "actual": 0,
             "reason": "No git diff detected in AutoMind repo; architecture scope check has no changed files to review.",
+            "triageSource": "code_deterministic",
+            "needsModelReview": False,
         })
 
     category_batches: dict[str, list[str]] = {}

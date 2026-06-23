@@ -98,6 +98,9 @@ def _attempt_from_result(row: dict[str, Any], iteration: int, source: str) -> di
         "ruledOut": _list_value(row, "ruledOut", "ruledOutHypotheses"),
         "remainingHypotheses": _list_value(row, "remainingHypotheses"),
         "nextSelectorCandidates": _list_value(row, "nextSelectorCandidates", "selectorCandidates"),
+        "recoveryAction": _string_value(row, "recoveryAction"),
+        "failureCategory": _string_value(row, "category", "failureClass"),
+        "sameProblemKey": _string_value(row, "sameProblemKey"),
     }
 
 
@@ -129,6 +132,47 @@ def record_tc_attempts(task_dir: Path, evaluation: dict[str, Any], source: str =
             continue
         rows.append(attempt)
         rows.sort(key=lambda x: int(x.get("iteration") or 0))
+    # Second pass: pull structured failure-triage data from failedChecks[].
+    # Evaluator writes recoveryAction / failureCategory / sameProblemKey on
+    # failedCheck entries rather than testResult rows, so convergence tracking
+    # must pick them up here. This is how the "build failed because of missing
+    # pod" insight flows into tc-attempts.json for the budget guard and next
+    # round's generator to see.
+    failed_checks = list(evaluation.get("failedChecks") or [])
+    recovery_by_tc: dict[str, dict[str, Any]] = {}
+    for fc in failed_checks:
+        if not isinstance(fc, dict):
+            continue
+        tcs = fc.get("testCaseIds") or fc.get("testCases") or []
+        if not isinstance(tcs, list):
+            tcs = [tcs]
+        if not tcs:
+            # When failedChecks have no explicit TC ids, associate with
+            # the most-tried TC so the insight is not silently lost.
+            tcs = sorted(attempts.keys())[:1]
+        recovery_raw = (fc.get("recoveryAction") or "").strip()
+        failure_category = (fc.get("category") or "").strip()
+        spk = (fc.get("sameProblemKey") or "").strip()
+        specific_errors = fc.get("specificErrors") or []
+        if not recovery_raw and not failure_category:
+            continue
+        for tc_id in tcs:
+            tc_id = str(tc_id)
+            entry = recovery_by_tc.setdefault(tc_id, {
+                "recoveryActions": [],
+                "failureCategories": [],
+                "sameProblemKeys": [],
+                "specificErrors": [],
+            })
+            if recovery_raw and recovery_raw not in entry["recoveryActions"]:
+                entry["recoveryActions"].append(recovery_raw)
+            if failure_category and failure_category not in entry["failureCategories"]:
+                entry["failureCategories"].append(failure_category)
+            if spk and spk not in entry["sameProblemKeys"]:
+                entry["sameProblemKeys"].append(spk)
+            for err in specific_errors:
+                if isinstance(err, str) and err and err not in entry["specificErrors"]:
+                    entry["specificErrors"].append(err)
     latest: dict[str, Any] = {}
     progress_by_tc: dict[str, Any] = {}
     for tc_id, rows in attempts.items():
@@ -156,12 +200,22 @@ def record_tc_attempts(task_dir: Path, evaluation: dict[str, Any], source: str =
                 if value and value not in selector_candidates:
                     selector_candidates.append(value)
                     item_narrowed = True
+            item_recovery = (item.get("recoveryAction") or "").strip()
+            if item_recovery:
+                item_narrowed = True
             if item_narrowed:
                 narrowing_rounds += 1
             kind = str(item.get("progressKind") or "").strip()
             if kind and kind not in progress_kinds:
                 progress_kinds.append(kind)
         attempt_count = len([x for x in rows if isinstance(x, dict)])
+        recovery = recovery_by_tc.get(tc_id) or {}
+        # A "triage-ful" round is one where failedChecks produced a
+        # specific recovery action (not just "triage_needed" placeholder).
+        triage_actions = [
+            a for a in (recovery.get("recoveryActions") or [])
+            if a and a != "triage_needed"
+        ]
         progress_by_tc[tc_id] = {
             "attemptCount": attempt_count,
             "progressKinds": progress_kinds,
@@ -173,6 +227,16 @@ def record_tc_attempts(task_dir: Path, evaluation: dict[str, Any], source: str =
             # without convergence (an "invalid retry" pattern the budget guard
             # surfaces as a no-narrowing warning).
             "narrowingRounds": narrowing_rounds,
+            # Recovery-action surface area: structured triage output from the
+            # evaluator's failedChecks[] rows. These feed the next Generator's
+            # "recovery-action first" rule so it runs `pod install` /
+            # `custom_build_wrapper.sh` / the project's own dependency-command rather than
+            # re-issuing the same failing xcodebuild command.
+            "recoveryActions": recovery.get("recoveryActions") or [],
+            "failureCategories": recovery.get("failureCategories") or [],
+            "sameProblemKeys": recovery.get("sameProblemKeys") or [],
+            "specificErrors": recovery.get("specificErrors") or [],
+            "hasSpecificRecovery": bool(triage_actions),
             "latestOutcome": str(rows[-1].get("outcome") or rows[-1].get("summary") or "") if isinstance(rows[-1], dict) else "",
         }
     ledger = {

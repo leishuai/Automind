@@ -91,6 +91,14 @@ class StuckDetector:
                     "count": self._streak,
                     "threshold": self.threshold,
                 },
+                "triageSource": "requires_model_review",
+                "needsModelReview": True,
+                "reason": (
+                    "相同粗签名连续出现 " + str(self._streak) + " 次 >= 阈值 "
+                    + str(self.threshold) + "。阈值是启发式判断；"
+                    "模型应重新分析此签名下最近几次迭代是否确实卡住，"
+                    "而不是不同原因但归类相同的情况。"
+                ),
                 "recommendedNextAction": "replan",
             }
         return None

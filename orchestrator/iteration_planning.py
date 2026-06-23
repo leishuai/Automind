@@ -48,6 +48,11 @@ def build_exploration_context(task_dir: Path, limit: int = 8) -> dict[str, Any]:
             "remainingHypotheses": _safe_list(item.get("remainingHypotheses")),
             "nextSelectorCandidates": _safe_list(item.get("nextSelectorCandidates")),
             "narrowingRounds": int(item.get("narrowingRounds") or 0),
+            "recoveryActions": _safe_list(item.get("recoveryActions")),
+            "failureCategories": _safe_list(item.get("failureCategories")),
+            "sameProblemKeys": _safe_list(item.get("sameProblemKeys")),
+            "specificErrors": _safe_list(item.get("specificErrors")),
+            "hasSpecificRecovery": bool(item.get("hasSpecificRecovery")),
             "latestOutcome": str(item.get("latestOutcome") or ""),
             "latestHypothesis": str(latest_attempt.get("hypothesis") or ""),
             "latestExpectedSignal": str(latest_attempt.get("expectedSignal") or ""),
@@ -138,11 +143,27 @@ def render_iteration_purpose_md(purpose: dict[str, Any]) -> str:
             f"  - remaining hypotheses: {', '.join(item.get('remainingHypotheses') or []) or '-'}",
             f"  - next selector candidates: {', '.join(item.get('nextSelectorCandidates') or []) or '-'}",
         ])
-        if int(item.get("attemptCount") or 0) >= 2 and int(item.get("narrowingRounds") or 0) == 0:
+        failure_cats = item.get("failureCategories") or []
+        recovery_actions = item.get("recoveryActions") or []
+        if failure_cats or recovery_actions:
             lines.append(
-                "  - WARNING: repeated attempts but nothing ruled out and no new candidate proposed. "
-                "This is an invalid retry pattern — narrow the search space (record ruledOut / "
-                "remainingHypotheses / nextSelectorCandidates from observed evidence) or change the approach."
+                f"  - failure triage: categories=[{', '.join(failure_cats) or '-'}] "
+                f"recoveryActions=[{'; '.join(recovery_actions) or '-'}]"
+            )
+            sp_keys = item.get("sameProblemKeys") or []
+            if sp_keys:
+                lines.append(f"  - sameProblemKeys: {', '.join(sp_keys)}")
+            spec_errs = item.get("specificErrors") or []
+            if spec_errs:
+                lines.append("  - specific errors:")
+                for err in spec_errs[:5]:
+                    lines.append(f"    - {str(err)[:200]}")
+        if int(item.get("attemptCount") or 0) >= 2 and int(item.get("narrowingRounds") or 0) == 0 and not item.get("hasSpecificRecovery"):
+            lines.append(
+                "  - WARNING: repeated attempts but nothing ruled out and no concrete recovery action was proposed. "
+                "This is an invalid retry pattern — classify the failure (read the actual error output), "
+                "propose a recoveryAction such as `pod install` or the project's own dependency command, "
+                "and record it in evaluation.json.failedChecks[] before retrying."
             )
     return "\n".join(lines).rstrip() + "\n"
 

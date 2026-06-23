@@ -4,11 +4,16 @@ Classify why a harness-loop iteration ended into:
 
 - ``recoverable``  : transient cause; loop should ``continue`` and bump retry_count
 - ``unrecoverable``: clean stop required (KeyboardInterrupt, completion, hard error)
-- ``unknown``      : default conservative classification
+- ``unknown``      : default conservative classification; the caller must route
+  this to the model/human for a contextual decision.
 
 Centralizing the decision lets ``run_harness_loop`` route 13+ ``return False``
 sites consistently and lets us unit-test the policy without spinning up the full
 loop. ``classify_loop_exit`` is pure: it never reads the filesystem.
+
+Every returned :class:`LoopDecision` carries a ``triageSource`` field so callers
+can tell apart code-deterministic exits (recoverable/unrecoverable reason sets)
+from ambiguous ones (``requires_model_review``).
 """
 from __future__ import annotations
 
@@ -46,7 +51,11 @@ UNRECOVERABLE_REASONS: frozenset[str] = frozenset({
 
 @dataclass(frozen=True)
 class LoopDecision:
-    """Outcome of classifying one loop-exit attempt."""
+    """Outcome of classifying one loop-exit attempt.
+
+    ``triageSource`` / ``needsModelReview`` let callers route ambiguous
+    exits to the model/human instead of silently stopping.
+    """
 
     classification: str  # "recoverable" | "unrecoverable" | "unknown"
     should_continue: bool
@@ -54,6 +63,8 @@ class LoopDecision:
     interrupted_by_user: bool
     reason: str
     detail: str = ""
+    triageSource: str = "code_deterministic"  # "code_deterministic" | "requires_model_review"
+    needsModelReview: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -63,6 +74,8 @@ class LoopDecision:
             "interruptedByUser": self.interrupted_by_user,
             "reason": self.reason,
             "detail": self.detail,
+            "triageSource": self.triageSource,
+            "needsModelReview": self.needsModelReview,
         }
 
 
@@ -93,6 +106,8 @@ def classify_loop_exit(
             interrupted_by_user=True,
             reason="keyboard_interrupt",
             detail=str(exception or ""),
+            triageSource="code_deterministic",
+            needsModelReview=False,
         )
     if isinstance(exception, SystemExit):
         return LoopDecision(
@@ -102,6 +117,8 @@ def classify_loop_exit(
             interrupted_by_user=False,
             reason="system_exit",
             detail=str(exception or ""),
+            triageSource="code_deterministic",
+            needsModelReview=False,
         )
 
     if reason_norm in RECOVERABLE_REASONS:
@@ -111,6 +128,8 @@ def classify_loop_exit(
             bump_retry=True,
             interrupted_by_user=False,
             reason=reason_norm,
+            triageSource="code_deterministic",
+            needsModelReview=False,
         )
     if reason_norm in UNRECOVERABLE_REASONS:
         return LoopDecision(
@@ -119,11 +138,17 @@ def classify_loop_exit(
             bump_retry=False,
             interrupted_by_user=(reason_norm == "keyboard_interrupt"),
             reason=reason_norm,
+            triageSource="code_deterministic",
+            needsModelReview=False,
         )
+    # Ambiguous — code does not know whether this is transient or a hard
+    # stop. Surface the uncertainty so the harness can ask the model/human.
     return LoopDecision(
         classification="unknown",
         should_continue=False,
         bump_retry=False,
         interrupted_by_user=False,
         reason=reason_norm or "unspecified",
+        triageSource="requires_model_review",
+        needsModelReview=True,
     )

@@ -85,6 +85,19 @@
               "repeated_same_failure"
             ],
             "description": "Standard failure category used by orchestrator and future policy logic."
+          },
+          "triageSource": {
+            "type": "string",
+            "enum": [
+              "code_deterministic",
+              "requires_model_review",
+              "model_reviewed"
+            ],
+            "description": "Model-first triage signal for failure classification. code_deterministic = classified by known pattern with no model review needed. requires_model_review = the code could not classify and the Evaluator must re-examine the evidence. model_reviewed = the Evaluator reviewed and re-classified this entry."
+          },
+          "needsModelReview": {
+            "type": "boolean",
+            "description": "Explicit signal to the Evaluator/Generator. true means this entry was not classified by code and requires model analysis. false means either the code classified it or the Evaluator has reviewed it."
           }
         }
       }
@@ -403,6 +416,19 @@
           "source": {
             "type": "string"
           },
+          "triageSource": {
+            "type": "string",
+            "enum": [
+              "code_deterministic",
+              "requires_model_review",
+              "model_reviewed"
+            ],
+            "description": "Model-first triage signal. code_deterministic = classified by known pattern with no model review needed. requires_model_review = the code could not classify and the Evaluator must re-examine the evidence. model_reviewed = the Evaluator reviewed and re-classified this entry."
+          },
+          "needsModelReview": {
+            "type": "boolean",
+            "description": "Explicit signal to the Evaluator/Generator. true means this entry was not classified by code and requires model analysis. false means either the code classified it or the Evaluator has reviewed it."
+          },
           "testCaseId": {
             "type": "string",
             "description": "Source TestCases.md ID when this quality check maps to a declared testcase."
@@ -566,6 +592,10 @@
                     "type": "string"
                   }
                 }
+              },
+              "assertionEvidenceTruncated": {
+                "type": "boolean",
+                "description": "Set true when the value that proves this testcase's key assertion (e.g. a log payload field) is only observable inside a truncated/elided evidence line, so the full value was never actually captured. A verdict=proved row whose hardMetrics keyword/log/string/grep/regex/ocr value lands inside a truncated evidence line is rejected by completion-check (runtimeAssertionProofUntruncated=false) unless an independent secondaryAssessment or recorded humanConfirmation backs it. Prefer persisting the full untruncated log/screenshot and pointing the metric `evidence` at it instead of relying on a tail/excerpt."
               }
             }
           },

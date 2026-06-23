@@ -62,7 +62,14 @@ def test_gradle_task_not_found_is_verifier_command_misconfig() -> None:
 
 
 def test_plain_android_build_failure_still_falls_back() -> None:
+    """When no deterministic code-pattern matches, the classifier surfaces
+    ``triageSource="unclassified"`` and ``recoveryAction="triage_needed"`` so
+    the evaluator/model reads the raw build log and chooses a fine-grained
+    category instead of collapsing everything into a broad ``build_failure``.
+    """
     fc = _classifier()
     c = fc.classify("android", "build", "build failed: duplicate class found")
-    assert c.category == "build_failure"
-    assert c.sameProblemKey == "android.build.failure"
+    assert c.category == "unknown"
+    assert c.triageSource == "unclassified"
+    assert c.recoveryAction == "triage_needed"
+    assert c.sameProblemKey == "android.build.unclassified_triage_needed"

@@ -49,6 +49,10 @@ case "$command" in
         $PYTHON_EXEC "$ORCHESTRATOR" version
         ;;
 
+    update)
+        $PYTHON_EXEC "$ORCHESTRATOR" update "$@"
+        ;;
+
     init)
         log "Checking environment..."
         
@@ -917,6 +921,8 @@ Install / export:
       Check environment and create AutoMind directories.
   version
       Show AutoMind runtime version.
+  update
+      Update AutoMind runtime, CLI wrapper, skill package, and /automind command.
   shell
       Open the AutoMind interactive command shell.
   export-skill [dir] [--install auto|claude|codex|trae|trae-cn]
@@ -949,6 +955,9 @@ Common workflows:
     $CLI_NAME record-check <task-code>
     $CLI_NAME report <task-code>
 
+  Update AutoMind:
+    $CLI_NAME update
+
   Install agent integrations:
     $CLI_NAME export-skill --install auto
     $CLI_NAME export-command --install auto
@@ -970,6 +979,7 @@ Examples:
   $CLI_NAME ios-preflight ios_preflight_demo
   $CLI_NAME ios-xcuitest ios_demo_xcuitest 1 --project-path demos/ios-simulator-demo/AutoMindIOSDemo.xcodeproj --scheme AutoMindIOSDemo --device-id <ios-device-udid> --team <development-team-id> --bundle-id ai.openclaw.automind.demo
   $CLI_NAME web-probe-flow web_probe_flow_demo 1 --dry-run
+  $CLI_NAME update
   $CLI_NAME export-skill
   $CLI_NAME export-skill --install auto
   $CLI_NAME export-command --install all

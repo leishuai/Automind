@@ -187,6 +187,29 @@ next task's `Reuse.md`. In skill/current-session mode, prefer `summary --ai <age
 or `summary-refine`; AutoMind falls back to deterministic summary when the agent
 is unavailable or returns invalid JSON. Do not replace these gates with chat confidence.
 
+## Updating AutoMind itself
+
+When the user asks to update, upgrade, refresh, reinstall, or sync AutoMind itself,
+prefer the formal maintenance command:
+
+```bash
+<AUTOMIND_CLI> update
+```
+
+Examples of update intent:
+
+- "更新 AutoMind"
+- "升级一下 automind"
+- "refresh AutoMind runtime"
+- "同步最新 AutoMind skill/command"
+
+This updates the AutoMind runtime, CLI wrapper, skill package, and `/automind`
+slash-command integrations. Update-only intent is **not** an AutoMind task:
+do not run `scaffold`, do not create `.automind/tasks/<task>/`, and do not enter
+the harness loop. If `<AUTOMIND_CLI> update` is unavailable because the installed
+runtime is too old, suggest the documented one-line installer from
+`docs/references/installation-runtime.md`.
+
 ## Continue-until-done protocol (Skill mode automation)
 
 Skill mode lacks the orchestrator while-loop, so the host agent itself must

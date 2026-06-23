@@ -25,13 +25,21 @@ The installer does **not** install Android Studio, Xcode, SDKs, device trust, si
 
 ## Updating
 
-Install and update use the same command — rerun the one-line installer:
+Preferred update command after AutoMind is installed:
+
+```bash
+automind update
+```
+
+`automind update` reruns the bundled installer bootstrap. It updates the installer git cache (`git fetch` + reset to the target ref, default `origin/main`), re-syncs the git-free runtime into `AUTOMIND_HOME` with `rsync --delete`, refreshes the CLI wrapper, and reinstalls the AutoMind skill plus `/automind` command for detected supported coding agents. The `--delete` sync drops stale runtime files from the previous version but preserves local data: it excludes `.automind/tasks/`, `.automind/summary/`, `dist/`, and `.venv-*/`.
+
+If the installed runtime is too old to support `automind update`, rerun the one-line installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/leishuai/Automind/main/install-curl.sh | bash
 ```
 
-On a rerun the installer cache already exists, so the bootstrap updates it (`git fetch` + reset to the target ref, default `origin/main`) before re-syncing the git-free runtime into `AUTOMIND_HOME` with `rsync --delete` and reinstalling the agent skill/command files. The `--delete` sync drops stale files from the previous version but preserves local data: it excludes `.automind/tasks/`, `.automind/summary/`, `dist/`, and `.venv-*/`. Set `AUTOMIND_BRANCH=<ref>` to install or pin a specific version, and `AUTOMIND_UPDATE=0` to reuse the existing cache without fetching. A local source checkout can sync its current state instead with `AUTOMIND_HOME=~/.automind/automind ./install.sh` (uses the checkout's code rather than fetching the remote).
+Set `AUTOMIND_BRANCH=<ref>` to install or pin a specific version, and `AUTOMIND_UPDATE=0` to reuse the existing cache without fetching. A local source checkout can sync its current state instead with `AUTOMIND_HOME=~/.automind/automind ./install.sh` (uses the checkout's code rather than fetching the remote).
 
 ## Runtime root
 

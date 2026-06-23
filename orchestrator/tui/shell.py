@@ -26,7 +26,7 @@ from orchestrator.state import ensure_tui_chat_task, get_tui_chat_task_code, rea
 AGENT_NAMES = {"auto", "codex", "claude", "trae"}
 TUI_FLAGS = {"--tui", "--detached", "--no-tui"}
 COMMANDS = {
-    "ask", "resume", "status", "trace", "process-check", "workflow-check", "version",
+    "ask", "resume", "status", "trace", "process-check", "workflow-check", "version", "update",
     "workflow-contract", "completion-check", "record-check", "summary",
     "summary-refine", "improve-suggestions", "tui", "answer", "message",
     "event", "continue", "logs", "list", "reuse", "preloaded-check", "help",
@@ -111,6 +111,7 @@ def run_command_shell() -> int:
     print("  ask 添加一个埋点")
     print("  resume <task-code> codex")
     print("  status [task-code]   # current task is used when omitted")
+    print("  update               # update AutoMind runtime + skill/command integrations")
     print("  也可以直接输入自然语言；有 current task 时会转给该 task/session 的 coding agent，没有 current task 时会转给当前 TUI 进程自己的默认 coding-agent session")
     print("  exit")
     print(style("Tip: say \"全自动\" or \"full auto\" to skip all ask_user gates.", GRAY))

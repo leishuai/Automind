@@ -23,7 +23,7 @@ def command_body(command_name: str = "automind") -> str:
     slash = f"/{command_name}"
     return f"""---
 description: AutoMind evidence-driven harness loop command. Use for testable requirements, current-session Generator work, isolated Evaluator evidence, and structured loop decisions.
-argument-hint: [ask|resume|status|summary|verify|detached|cli-ask|help] [task or request]
+argument-hint: [ask|resume|status|summary|verify|detached|cli-ask|update|help] [task or request]
 ---
 
 # {slash} - AutoMind Command
@@ -66,6 +66,22 @@ $ARGUMENTS
 ```
 
 If the host does not support `$ARGUMENTS`, infer the request from the user's message after `{slash}`.
+
+## Update intent
+
+If the user invokes `{slash} update` or asks to update, upgrade, refresh,
+reinstall, or sync AutoMind itself, run:
+
+```bash
+<AUTOMIND_CLI> update
+```
+
+This is a maintenance command for AutoMind itself: it updates the AutoMind
+runtime, CLI wrapper, skill package, and `{slash}` slash-command integrations.
+Do not scaffold a task, do not create `.automind/tasks/<task>/`, and do not
+enter the harness loop for update-only intent. If `<AUTOMIND_CLI> update` is
+unavailable because the installed runtime is too old, suggest the documented
+one-line installer from `docs/references/installation-runtime.md`.
 
 ## Non-negotiable execution rules
 

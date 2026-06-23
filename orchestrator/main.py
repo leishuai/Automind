@@ -6959,6 +6959,55 @@ def cmd_synthesize_evidence(task_code: str):
     )
 
 
+def cmd_update(argv_tail: list[str] | None = None) -> None:
+    """Update the installed AutoMind runtime and agent integrations."""
+    argv_tail = argv_tail or []
+    if any(arg in {"-h", "--help"} for arg in argv_tail):
+        print("""
+AutoMind update
+
+Usage:
+  automind update
+
+What it does:
+  - Prefer the bundled install-curl.sh bootstrap.
+  - Update the installer git cache from AUTOMIND_REPO/AUTOMIND_BRANCH.
+  - Sync the git-free runtime into AUTOMIND_HOME (default: ~/.automind/automind).
+  - Refresh the automind CLI wrapper plus agent skill/command integrations.
+
+Useful environment overrides:
+  AUTOMIND_BRANCH=<ref>           Update to a branch/tag/ref. Default: main.
+  AUTOMIND_HOME=<path>            Runtime install path. Default: ~/.automind/automind.
+  AUTOMIND_INSTALL_AGENT=auto     Install skill/command into detected agent roots.
+  AUTOMIND_INSTALL_COMMAND=0      Skip slash-command install.
+  AUTOMIND_UPDATE=0               Reuse existing installer cache without fetching.
+""".strip())
+        return
+    if argv_tail:
+        error("update does not accept positional arguments; use environment variables such as AUTOMIND_BRANCH=<ref> for advanced options")
+        sys.exit(1)
+
+    bootstrap = AUTOMIND_ROOT / "install-curl.sh"
+    installer = AUTOMIND_ROOT / "install.sh"
+    env = os.environ.copy()
+    env.setdefault("AUTOMIND_UPDATE", "1")
+
+    if bootstrap.exists():
+        log(f"Updating AutoMind with bootstrap: {bootstrap}")
+        subprocess.run(["bash", str(bootstrap)], check=True, env=env)
+        success("AutoMind update complete")
+        return
+
+    if installer.exists():
+        warn("install-curl.sh not found; refreshing from local install.sh without fetching remote updates")
+        subprocess.run(["bash", str(installer)], check=True, env=env, cwd=str(AUTOMIND_ROOT))
+        success("AutoMind local refresh complete")
+        return
+
+    error(f"No AutoMind installer found under runtime root: {AUTOMIND_ROOT}")
+    sys.exit(1)
+
+
 def cmd_help():
     """Show help."""
     print("""
@@ -6969,6 +7018,7 @@ Usage: python orchestrator.py <command> [args]
 Commands:
   list                      List tasks
   shell                         Open AutoMind interactive command shell
+  update                    Update AutoMind runtime, CLI wrapper, skill, and slash command
   ask <requirement> [agent] [--tui|--detached]  Create a task and start an AutoMind-owned CLI/TUI harness loop
                           agent options: auto (default) / codex / claude / trae / trae-cn
   scaffold <requirement>     Create task artifacts for current-session skill/slash-command mode
@@ -7004,6 +7054,7 @@ Commands:
 
 Examples:
   python orchestrator.py ask "Build a calculator with add/subtract/multiply/divide"  # defaults to auto agent selection
+  python orchestrator.py update
   python orchestrator.py scaffold "Fix login crash and verify"
   python orchestrator.py context-pack calculator_1230 1
   python orchestrator.py list
@@ -7066,6 +7117,10 @@ def main():
 
     if cmd == "version":
         print(automind_version_label())
+        return
+
+    if cmd == "update":
+        cmd_update(sys.argv[2:])
         return
 
     if cmd == "list":

@@ -36,6 +36,9 @@ def test_export_skill_contains_skill_mode_json_handoff_contract(tmp_path: Path) 
     assert "run a CLI command only when that checklist item explicitly names" in skill
     assert "phase-reuse/<phase>.md" in skill
     assert "docs/references/skill-command-driver-checklist.md" in skill
+    assert "Updating AutoMind itself" in skill
+    assert "<AUTOMIND_CLI> update" in skill
+    assert "do not run `scaffold`" in skill
     assert (out_dir / "docs" / "phases" / "demand-definition.md").exists()
     assert (out_dir / "docs" / "phases" / "verification-execution-planning.md").exists()
     alias = (out_dir / "templates" / "test_planner_prompt.md").read_text()
@@ -78,7 +81,11 @@ def test_export_command_contains_json_handoff_contract(tmp_path: Path) -> None:
     assert "phase-reuse/generator.md" in command
     assert "run a CLI command only when that item explicitly provides one" in command
     assert "automind-workflow-state.json" in command
-    artifact_block = command.split(".automind/tasks/<task>/", 1)[1].split("```", 1)[0]
+    assert "ask|resume|status|summary|verify|detached|cli-ask|update|help" in command
+    assert "Update intent" in command
+    assert "<AUTOMIND_CLI> update" in command
+    assert "Do not scaffold a task" in command
+    artifact_block = command.split("```text\n.automind/tasks/<task>/", 1)[1].split("```", 1)[0]
     assert artifact_block.count("runtime-state.json") == 1
 
 

@@ -346,6 +346,59 @@ tokens used
     assert extract_agent_reply("codex", noisy) == "You are in:\n\n`/tmp/demo`"
 
 
+def test_cmd_help_includes_update_command(capsys) -> None:
+    from orchestrator import main as main_mod
+
+    main_mod.cmd_help()
+    out = capsys.readouterr().out
+
+    assert "update" in out
+    assert "Update AutoMind runtime" in out
+
+
+def test_cmd_update_prefers_install_curl_bootstrap(tmp_path: Path, monkeypatch, capsys) -> None:
+    from orchestrator import main as main_mod
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    bootstrap = runtime / "install-curl.sh"
+    bootstrap.write_text("#!/usr/bin/env bash\n")
+    installer = runtime / "install.sh"
+    installer.write_text("#!/usr/bin/env bash\n")
+    calls = []
+    monkeypatch.setattr(main_mod, "AUTOMIND_ROOT", runtime)
+    monkeypatch.setattr(main_mod.subprocess, "run", lambda args, **kwargs: calls.append((args, kwargs)))
+
+    main_mod.cmd_update([])
+    out = capsys.readouterr().out
+
+    assert calls
+    assert calls[0][0] == ["bash", str(bootstrap)]
+    assert calls[0][1]["env"]["AUTOMIND_UPDATE"] == "1"
+    assert "AutoMind update complete" in out
+
+
+def test_cmd_update_falls_back_to_local_install_without_bootstrap(tmp_path: Path, monkeypatch, capsys) -> None:
+    from orchestrator import main as main_mod
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    installer = runtime / "install.sh"
+    installer.write_text("#!/usr/bin/env bash\n")
+    calls = []
+    monkeypatch.setattr(main_mod, "AUTOMIND_ROOT", runtime)
+    monkeypatch.setattr(main_mod.subprocess, "run", lambda args, **kwargs: calls.append((args, kwargs)))
+
+    main_mod.cmd_update([])
+    captured = capsys.readouterr()
+
+    assert calls
+    assert calls[0][0] == ["bash", str(installer)]
+    assert calls[0][1]["cwd"] == str(runtime)
+    assert "without fetching remote updates" in captured.out
+    assert "AutoMind local refresh complete" in captured.out
+
+
 def test_cmd_message_hidden_tui_chat_reuses_cached_agent(tmp_path: Path, monkeypatch, capsys) -> None:
     import orchestrator.commands.session as session_cmd
 

@@ -22,7 +22,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 def command_body(command_name: str = "automind") -> str:
     slash = f"/{command_name}"
     return f"""---
-description: AutoMind evidence-driven harness loop command. Defaults to high automation: keep looping implement -> verify -> repair without pausing, unless a real sensitive/destructive decision or a hard gate needs the user. Use for testable requirements, current-session Generator work, isolated Evaluator evidence, and structured loop decisions.
+description: "AutoMind evidence-driven harness loop command. Defaults to high automation: keep looping implement -> verify -> repair without pausing, unless a real sensitive/destructive decision or a hard gate needs the user. Use for testable requirements, current-session Generator work, isolated Evaluator evidence, and structured loop decisions."
 argument-hint: [ask|resume|status|summary|verify|detached|cli-ask|update|help] [task or request]
 ---
 

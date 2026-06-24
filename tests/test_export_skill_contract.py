@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -50,6 +51,12 @@ def test_export_skill_contains_skill_mode_json_handoff_contract(tmp_path: Path) 
     assert (out_dir / "docs" / "tui-session-observability.md").exists()
     assert (out_dir / "docs" / "references" / "skill-command-driver-checklist.md").exists()
     assert (out_dir / "docs" / "references" / "app-use-verification.md").exists()
+    frontmatter = skill.split("---", 2)[1]
+    assert "name: automind-skill" in frontmatter
+    description_line = next(line for line in frontmatter.splitlines() if line.startswith("description: "))
+    assert description_line.startswith('description: "')
+    assert description_line.endswith('"')
+    assert "high automation with keeping looping" in description_line
     assert (out_dir / "schemas" / "workflow.schema.json").exists()
     assert (out_dir / "schemas" / "runtime-state.schema.json").exists()
     assert (out_dir / "schemas" / "automind-workflow-state.schema.json").exists()
@@ -85,6 +92,11 @@ def test_export_command_contains_json_handoff_contract(tmp_path: Path) -> None:
     assert "Update intent" in command
     assert "<AUTOMIND_CLI> update" in command
     assert "Do not scaffold a task" in command
+    frontmatter = command.split("---", 2)[1]
+    description_line = next(line for line in frontmatter.splitlines() if line.startswith("description: "))
+    assert description_line.startswith('description: "')
+    assert description_line.endswith('"')
+    assert "high automation: keep looping" in description_line
     artifact_block = command.split("```text\n.automind/tasks/<task>/", 1)[1].split("```", 1)[0]
     assert artifact_block.count("runtime-state.json") == 1
 

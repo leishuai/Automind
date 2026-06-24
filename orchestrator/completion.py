@@ -926,8 +926,63 @@ def verification_unblock_mentioned_without_record(task_dir: Path, evaluation: di
         "临时改动",
         "临时文件",
         "绕过环境",
+        "testability anchor",
+        "test anchor",
+        "testability hook",
+        "automation anchor",
+        "ui automation anchor",
+        "测试锚点",
+        "测试桩",
+        "自动化锚点",
     ]
     return any(pattern in text for pattern in patterns)
+
+
+# Signals that an unblock change is test-instrumentation (a testability hook
+# added only so automated verification can locate/drive the UI), not a real
+# product fix. Such instrumentation must be removed (status=restored) before
+# delivery; it must never be promoted into product code.
+TEST_INSTRUMENTATION_KEYWORDS = (
+    "accessibilityidentifier",
+    "accessibility identifier",
+    "accessibilitylabel",
+    "isaccessibilityelement",
+    "testability anchor",
+    "test anchor",
+    "testability hook",
+    "test hook",
+    "debug hook",
+    "ui automation anchor",
+    "automation anchor",
+    "instrumentation",
+    "testtag",
+    "test tag",
+    "contentdescription for test",
+    "测试锚点",
+    "测试桩",
+    "自动化锚点",
+    "埋点用于测试",
+)
+
+
+def _unblock_change_is_test_instrumentation(item: dict) -> bool:
+    """Heuristically detect a test-instrumentation unblock change.
+
+    Honors an explicit `category` field first (deterministic intent from the
+    Evaluator), then falls back to keyword signals in scope/reason/files so
+    older records without the field are still caught.
+    """
+    category = str(item.get("category", "")).strip().lower()
+    if category in {"test_instrumentation", "test-instrumentation", "testability"}:
+        return True
+    if category in {"build_unblock", "build-unblock", "config", "dependency", "other"}:
+        return False
+    haystack_parts = [str(item.get("scope", "")), str(item.get("reason", ""))]
+    files = item.get("files")
+    if isinstance(files, list):
+        haystack_parts.extend(str(f) for f in files)
+    haystack = "\n".join(haystack_parts).lower()
+    return any(keyword in haystack for keyword in TEST_INSTRUMENTATION_KEYWORDS)
 
 
 def validate_verification_unblock_changes(task_dir: Path, evaluation: dict) -> tuple[list[str], list[str]]:
@@ -945,6 +1000,11 @@ def validate_verification_unblock_changes(task_dir: Path, evaluation: dict) -> t
             issues.append(f"{prefix} status must be restored/promoted/active before completion")
         elif status == "active":
             issues.append(f"{prefix} is still active; restore or promote it before finish")
+        if status in {"promoted", "active"} and _unblock_change_is_test_instrumentation(item):
+            issues.append(
+                f"{prefix} is test instrumentation (testability anchor/hook) and must be removed "
+                f"(status=restored) before finish; test instrumentation cannot be promoted into product code"
+            )
         if not item.get("reason"):
             issues.append(f"{prefix} missing reason")
         files = item.get("files")

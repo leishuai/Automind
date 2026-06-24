@@ -323,7 +323,7 @@ Append this round to `{task_dir}/Validation.md`. Every validation round must cle
   - user response: confirmed/rejected/reference requested
   - status: requested/confirmed/rejected
 - Temporary verification unblock changes:
-  - `VUC-001`: status=restored/promoted/active/none; files=...; reason=...; checkpoint/diff=...; restoreEvidence=...; risk=...
+  - `VUC-001`: status=restored/promoted/active/none; category=test_instrumentation/build_unblock/config/dependency/other; files=...; reason=...; checkpoint/diff=...; restoreEvidence=...; risk=... (test_instrumentation must be restored, never promoted)
 - Known successful path considered: `<Reuse.md / phase-reuse entry or none>`; decision: used / ignored because ...
 - Reusable findings: include any successful build/test/launch/verification command or method that should become future `Successful path:` reuse memory, with cwd/preconditions/evidence.
 - Avoid repeating: include failed/deprecated commands or methods that should become future `Avoid path:` reuse memory, with failure category/evidence/condition to retry.
@@ -377,6 +377,7 @@ JSON schema convention:
     {
       "id": "VUC-001",
       "status": "restored | promoted | active",
+      "category": "test_instrumentation | build_unblock | config | dependency | other",
       "files": ["path/to/file"],
       "reason": "why the temporary unblock was needed",
       "scope": "test harness | local config | unrelated target | debug hook",
@@ -460,7 +461,7 @@ Constraints:
 - A pass/final finish must include `testResults[]` or equivalent adapter evidence that can be normalized by AutoMind's completion gate. Every required `TC-*` from `TestCases.md` must pass, every required `AC-xxx` from `Requirements.md` must be covered by a passed required testcase, and required evidence paths must exist.
 - If any required testcase is not run, skipped, failed, blocked, or lacks evidence, do not finish. Use `retry_generator`, `replan`, or `ask_user` according to the cause.
 - `evidenceIndex[]` is optional and lightweight; use it to help map runner/script artifacts to `testResults[].evidence[]`, not as a heavy schema. `testResults[].evidence[]` may cite paths directly.
-- If `verificationUnblockChanges[]` exists, every item must be `restored` or `promoted` before finish. `active` temporary unblock changes require `nextAction=retry_generator`, `replan`, or `ask_user`.
+- If `verificationUnblockChanges[]` exists, every item must be `restored` or `promoted` before finish. `active` temporary unblock changes require `nextAction=retry_generator`, `replan`, or `ask_user`. Set `category` for each item. **`category=test_instrumentation`** (testability anchors/hooks added to product code only so automated tests can locate or drive the UI, e.g. an `accessibilityIdentifier`/`accessibilityLabel`/`testTag`/debug hook) **must be `restored` before finish — it can never be `promoted` into product code.** The completion gate blocks finish if a test-instrumentation unblock is left `promoted`/`active`. Build/dependency/config unblocks that the product genuinely needs to compile may still be `promoted`, but record them honestly and flag them for the module owner.
 - If `evaluatorChanges[]` is non-empty, every item must use an allowed category and only touch verifier/probe-flow/test-harness/evidence files. The completion gate forces `nextAction=retry_generator` when an item has `category=product_code` or files outside that scope, even if you set `result=pass`. When product code needs repair, do not edit it; emit `nextAction=retry_generator` with a Generator-actionable reason instead.
 - Every required `TC-*` row that ends `result=pass` and uses `evidenceAssessment.verdict=proved` MUST be backed by either a non-empty `hardMetrics` array (with at least one entry whose `passed=true`, e.g. `exit_code=0`, `build_succeeded=true`, `tests_passed >= expected`, `log_keyword_matched=true`, `screenshot_hash_matched=true`) or an independent `secondaryAssessment` object whose `assessor` differs from the primary `assessor` and whose `verdict` is `proved`/`manual_confirmed`. AutoMind blocks finish for any proved verdict that lacks both anchors so the model cannot self-prove a pass. Manual_confirmed rows backed by recorded `humanConfirmation` are exempt.
 - The orchestrator may run `completion-check` after you write `evaluation.json`; it can block `finish` even if you set `result=pass`.

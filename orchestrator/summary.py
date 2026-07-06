@@ -260,6 +260,43 @@ def _select_latest_non_blocked_command(commands: list[dict], blocked_signatures:
     return None
 
 
+def _collect_cached_ui_path_records(task_dir: Path) -> list[dict]:
+    """Build reuse records from this task's verified UI path cache, if any.
+
+    The cache holds action sequences proven on-device during Android
+    probe-flow. Surfacing them as successful-path records lets the next task's
+    Reuse.md point at a reusable UI navigation for the same app/screen.
+    """
+    try:
+        from orchestrator.ui_path_cache import get_ui_path_cache_file, read_ui_path_cache
+    except Exception:
+        return []
+    cache = read_ui_path_cache(task_dir)
+    if not isinstance(cache, dict) or not cache:
+        return []
+    cache_file = get_ui_path_cache_file(task_dir)
+    records: list[dict] = []
+    for tc_id, entry in cache.items():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("validity", "valid")).lower() != "valid":
+            continue
+        steps = entry.get("actionSequence")
+        step_count = len(steps) if isinstance(steps, list) else 0
+        if step_count == 0:
+            continue
+        records.append({
+            "purpose": f"verified UI navigation path for {tc_id} ({step_count} steps)",
+            "command": "reuse cached probe-flow steps; regenerated only if UI fingerprint changes",
+            "cwd": "-",
+            "preconditions": "Reuse only when the target app/screen and UI fingerprint match; a source/UI change invalidates the cache.",
+            "evidence": f"`{cache_file}`",
+            "scope": f"UI path cache: {tc_id}",
+            "confidence": "medium",
+        })
+    return records
+
+
 def build_reuse_path_records(
     task_dir: Path,
     evaluation: dict,
@@ -369,6 +406,12 @@ def build_reuse_path_records(
             "doNotRetryUnless": "current evidence proves the old blocker is resolved or this task explicitly requires retesting it",
             "reason": line,
         })
+
+    # Promote verified UI path cache entries so a later task on the same app can
+    # discover that a proven action sequence already exists (cross-task reuse).
+    if final_result == "pass":
+        for entry in _collect_cached_ui_path_records(task_dir):
+            successful.append(entry)
 
     # Deduplicate by path/purpose to keep Reuse.md readable.
     dedup_success: list[dict] = []

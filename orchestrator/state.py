@@ -708,3 +708,38 @@ def read_notifications(task_dir: Path, *, limit: int | None = None) -> list[dict
     if limit is not None and limit > 0:
         return entries[-limit:]
     return entries
+
+
+# ---------------------------------------------------------------------------
+# Warm build and UI path cache helpers
+# ---------------------------------------------------------------------------
+
+
+def get_warm_build_status(task_dir: Path) -> dict:
+    """Read the current warm build status from runtime-state.json."""
+    state = read_runtime_state(task_dir) or {}
+    return state.get("warmBuild") if isinstance(state.get("warmBuild"), dict) else {}
+
+
+def get_ui_path_cache_status(task_dir: Path) -> dict:
+    """Read the current UI path cache status from runtime-state.json."""
+    state = read_runtime_state(task_dir) or {}
+    return state.get("uiPathCache") if isinstance(state.get("uiPathCache"), dict) else {}
+
+
+def update_warm_build_state(task_dir: Path, **kwargs) -> None:
+    """Update warmBuild section in runtime-state.json."""
+    state = read_runtime_state(task_dir) or {}
+    warm_build = state.get("warmBuild") if isinstance(state.get("warmBuild"), dict) else {}
+    warm_build.update(kwargs)
+    warm_build["updatedAt"] = datetime.now().isoformat(timespec="seconds")
+    update_runtime_state(task_dir, warmBuild=warm_build)
+
+
+def update_ui_path_cache_state(task_dir: Path, **kwargs) -> None:
+    """Update uiPathCache section in runtime-state.json."""
+    state = read_runtime_state(task_dir) or {}
+    ui_cache = state.get("uiPathCache") if isinstance(state.get("uiPathCache"), dict) else {}
+    ui_cache.update(kwargs)
+    ui_cache["updatedAt"] = datetime.now().isoformat(timespec="seconds")
+    update_runtime_state(task_dir, uiPathCache=ui_cache)

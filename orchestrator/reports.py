@@ -97,6 +97,10 @@ def _format_duration(seconds: float) -> str:
     return f"{hours}h {minutes}m"
 
 
+def _render_metric_card(label: str, value: str) -> str:
+    return f'<div class="card"><div class="label">{_html(label)}</div><div class="value">{_html(value)}</div></div>'
+
+
 def _active_duration(task_dir: Path) -> dict | None:
     """Wall-clock span of the run minus time spent waiting on the user/tool.
 
@@ -796,6 +800,7 @@ def generate_html_report_for_task_dir(task_dir: Path, task_code: str | None = No
     iteration_total = _count_iterations(task_dir)
     tc_total, tc_passed = _testcase_pass_counts(test_results)
     duration = _active_duration(task_dir)
+    metrics = state.get("metrics") if isinstance(state.get("metrics"), dict) else {}
     global_screenshots = _global_screenshot_artifacts(task_dir, screenshots)
     runtime_ui_tc_ids = {
         str(tc.get("id") or "").upper()
@@ -952,6 +957,18 @@ def generate_html_report_for_task_dir(task_dir: Path, task_code: str | None = No
   </section>
 
   <section><h2>Completed / Target Requirements</h2><ul>{req_html}</ul><p>{_link(task_dir, 'Requirements.md', 'Open Requirements.md')}</p></section>
+
+  <section><h2>Execution Metrics</h2>
+    <div class="grid">
+      {_render_metric_card("Total duration", _format_duration(metrics.get("taskDuration", 0))) if metrics.get("taskDuration") else ""}
+      {_render_metric_card("Planning", _format_duration(metrics.get("aggregates", {}).get("phase_planning_duration", {}).get("sum", 0))) if metrics.get("aggregates", {}).get("phase_planning_duration") else ""}
+      {_render_metric_card("Generator", _format_duration(metrics.get("aggregates", {}).get("phase_generator_duration", {}).get("sum", 0))) if metrics.get("aggregates", {}).get("phase_generator_duration") else ""}
+      {_render_metric_card("Evaluator", _format_duration(metrics.get("aggregates", {}).get("phase_evaluator_duration", {}).get("sum", 0))) if metrics.get("aggregates", {}).get("phase_evaluator_duration") else ""}
+      {_render_metric_card("Warm build", _format_duration(metrics.get("aggregates", {}).get("warm_build_duration", {}).get("sum", 0))) if metrics.get("aggregates", {}).get("warm_build_duration") else ""}
+      {_render_metric_card("LLM tokens", f"{int(metrics.get('aggregates', {}).get('llm_total_tokens', {}).get('sum', 0))} tokens") if metrics.get("aggregates", {}).get("llm_total_tokens") else ""}
+    </div>
+    {f"<p class='muted'>Metrics collected at: {_html(metrics.get('collectedAt', '-'))}</p>" if metrics else ""}
+  </section>
 
   <section><h2>Generated / Changed Artifacts</h2><ul>
     <li>{_link(task_dir, 'Delivery.md', 'Delivery.md')} — generated/changed implementation report</li>

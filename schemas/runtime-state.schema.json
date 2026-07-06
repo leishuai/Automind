@@ -123,6 +123,240 @@
           "type": "string"
         }
       }
+    },
+    "warmBuild": {
+      "type": "object",
+      "description": "Warm build status and cache information for incremental compilation.",
+      "additionalProperties": true,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["pending", "running", "completed", "failed", "skipped", "timed_out"],
+          "description": "Current status of the warm build."
+        },
+        "platform": {
+          "type": "string",
+          "description": "Target platform: ios, android, or web."
+        },
+        "startedAt": {
+          "type": "string",
+          "description": "Timestamp when warm build started."
+        },
+        "completedAt": {
+          "type": "string",
+          "description": "Timestamp when warm build completed."
+        },
+        "buildCommand": {
+          "type": "string",
+          "description": "Build command executed during warm build."
+        },
+        "returnCode": {
+          "type": "integer",
+          "description": "Exit code of the warm build command."
+        },
+        "evidencePath": {
+          "type": "string",
+          "description": "Path to the warm build output log."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Reason for failure or skipping."
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last update timestamp."
+        }
+      }
+    },
+    "uiPathCache": {
+      "type": "object",
+      "description": "UI path cache and exploration status for runtime verification.",
+      "additionalProperties": true,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["pending", "running", "completed", "failed", "skipped", "timed_out"],
+          "description": "Current status of UI path exploration."
+        },
+        "platform": {
+          "type": "string",
+          "description": "Target platform: ios, android, or web."
+        },
+        "startedAt": {
+          "type": "string",
+          "description": "Timestamp when UI exploration started."
+        },
+        "completedAt": {
+          "type": "string",
+          "description": "Timestamp when UI exploration completed."
+        },
+        "evidencePath": {
+          "type": "string",
+          "description": "Path to the UI exploration result."
+        },
+        "exploredPaths": {
+          "type": "integer",
+          "description": "Number of UI paths found during exploration."
+        },
+        "cachedPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of TC IDs with cached UI paths."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Reason for failure or skipping."
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last update timestamp."
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Collected metrics for task execution analysis.",
+      "additionalProperties": true,
+      "properties": {
+        "collectedAt": {
+          "type": "string",
+          "description": "Timestamp when metrics were collected."
+        },
+        "taskDuration": {
+          "type": "number",
+          "description": "Total task duration in seconds."
+        },
+        "aggregates": {
+          "type": "object",
+          "description": "Aggregated metric statistics.",
+          "additionalProperties": true,
+          "properties": {
+            "phase_planning_duration": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "number"},
+                "max": {"type": "number"},
+                "avg": {"type": "number"},
+                "sum": {"type": "number"},
+                "count": {"type": "integer"},
+                "unit": {"type": "string"}
+              }
+            },
+            "phase_generator_duration": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "number"},
+                "max": {"type": "number"},
+                "avg": {"type": "number"},
+                "sum": {"type": "number"},
+                "count": {"type": "integer"},
+                "unit": {"type": "string"}
+              }
+            },
+            "phase_evaluator_duration": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "number"},
+                "max": {"type": "number"},
+                "avg": {"type": "number"},
+                "sum": {"type": "number"},
+                "count": {"type": "integer"},
+                "unit": {"type": "string"}
+              }
+            },
+            "phase_summary_duration": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "number"},
+                "max": {"type": "number"},
+                "avg": {"type": "number"},
+                "sum": {"type": "number"},
+                "count": {"type": "integer"},
+                "unit": {"type": "string"}
+              }
+            },
+            "warm_build_duration": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "number"},
+                "max": {"type": "number"},
+                "avg": {"type": "number"},
+                "sum": {"type": "number"},
+                "count": {"type": "integer"},
+                "unit": {"type": "string"}
+              }
+            },
+            "llm_prompt_tokens": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "number"},
+                "max": {"type": "number"},
+                "avg": {"type": "number"},
+                "sum": {"type": "number"},
+                "count": {"type": "integer"},
+                "unit": {"type": "string"}
+              }
+            },
+            "llm_completion_tokens": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "number"},
+                "max": {"type": "number"},
+                "avg": {"type": "number"},
+                "sum": {"type": "number"},
+                "count": {"type": "integer"},
+                "unit": {"type": "string"}
+              }
+            },
+            "llm_total_tokens": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "number"},
+                "max": {"type": "number"},
+                "avg": {"type": "number"},
+                "sum": {"type": "number"},
+                "count": {"type": "integer"},
+                "unit": {"type": "string"}
+              }
+            },
+            "iteration": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "number"},
+                "max": {"type": "number"},
+                "avg": {"type": "number"},
+                "sum": {"type": "number"},
+                "count": {"type": "integer"},
+                "unit": {"type": "string"}
+              }
+            },
+            "cpu_usage": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "number"},
+                "max": {"type": "number"},
+                "avg": {"type": "number"},
+                "sum": {"type": "number"},
+                "count": {"type": "integer"},
+                "unit": {"type": "string"}
+              }
+            },
+            "memory_usage": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "number"},
+                "max": {"type": "number"},
+                "avg": {"type": "number"},
+                "sum": {"type": "number"},
+                "count": {"type": "integer"},
+                "unit": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

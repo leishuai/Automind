@@ -35,6 +35,22 @@ from orchestrator.config import (
     TASK_STATUSES,
 )
 from orchestrator.console import error, log, read_tail, run_cmd, success, warn
+from orchestrator.warm_build import (
+    is_incremental_build_possible,
+    start_warm_build,
+    wait_for_warm_build,
+)
+from orchestrator.ui_path_cache import (
+    cache_ui_path,
+    compute_ui_fingerprint,
+    get_cached_ui_path,
+    wait_for_ui_exploration,
+)
+from orchestrator.metrics import (
+    record_phase_start,
+    record_phase_end,
+    flush_metrics,
+)
 from orchestrator.automation_tools import (
     AUTOMATION_TOOL_PROFILES,
     automation_setup_command_plan,
@@ -3447,6 +3463,79 @@ def build_default_android_probe_steps(req_text: str, app: Optional[dict] = None)
     return steps
 
 
+def _cache_probe_flow_paths(task_dir: Path, flow_path: Optional[Path], summary: dict) -> None:
+    """Cache the verified probe-flow steps for reuse in later runs.
+
+    Called only after the Android probe-flow completion gate confirms
+    nextAction=finish, so we cache steps that were actually proven on-device.
+    The cache is keyed by target TC id and validated by a UI fingerprint so a
+    later run can skip re-generating steps when the source UI is unchanged.
+    """
+    if not flow_path:
+        return
+    try:
+        flow = json.loads(Path(flow_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    steps = flow.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return
+    target_ids = infer_probe_target_testcases(task_dir, summary)
+    if not target_ids:
+        return
+    fingerprint = compute_ui_fingerprint(task_dir)
+    goal = str(flow.get("name") or task_dir.name)
+    for tc_id in target_ids:
+        cache_ui_path(task_dir, tc_id, goal, steps, fingerprint)
+
+
+def _reuse_cached_probe_flow(task_dir: Path, flow_path: Path) -> bool:
+    """Reuse a previously verified probe-flow when the source UI is unchanged.
+
+    Returns True when a valid cached flow was written to flow_path, letting the
+    caller skip step regeneration. The cache is only reused when its UI
+    fingerprint matches the current workspace, so structural/source changes
+    invalidate it and force fresh generation.
+    """
+    declared = extract_declared_testcases(task_dir)
+    runtime_ids = [
+        tc.get("id") for tc in declared
+        if tc.get("required") and _normalize_runtime_level(tc.get("runtimeLevel")) in {"device", "runtime"}
+    ]
+    runtime_ids = [str(x) for x in runtime_ids if x]
+    if not runtime_ids:
+        return False
+    fingerprint = compute_ui_fingerprint(task_dir)
+    for tc_id in runtime_ids:
+        cached = get_cached_ui_path(task_dir, tc_id, fingerprint)
+        if not cached:
+            continue
+        steps = cached.get("actionSequence")
+        if not isinstance(steps, list) or not steps:
+            continue
+        app, _warnings = extract_android_app_config(task_dir)
+        if not app:
+            return False
+        state = read_runtime_state(task_dir) or {}
+        flow = {
+            "platform": "android",
+            "name": f"{state.get('taskId', task_dir.name)} reused android probe flow",
+            "app": {
+                "apk": app.get("apk"),
+                "package": app.get("package"),
+                "activity": app.get("activity"),
+            },
+            "steps": steps,
+            "reusedFromCache": True,
+            "reusedTc": tc_id,
+        }
+        flow_path.write_text(json.dumps(flow, ensure_ascii=False, indent=2))
+        update_runtime_state(task_dir, probeFlow=str(flow_path), androidApp=app)
+        log(f"Reusing cached UI probe-flow for {tc_id} (UI fingerprint matched)")
+        return True
+    return False
+
+
 def generate_probe_flow_json(task_dir: Path, force: bool = False) -> tuple[Optional[Path], Optional[dict]]:
     """根据 Requirements.md验收标准生成 Android probe-flow.android.json。"""
     flow_path = resolve_probe_flow_path(task_dir, "android")
@@ -3458,6 +3547,14 @@ def generate_probe_flow_json(task_dir: Path, force: bool = False) -> tuple[Optio
     # When regenerating (force or invalid JSON), always write to the canonical
     # platform-suffixed name; never overwrite the legacy `probe-flow.json`.
     flow_path = task_dir / "probe-flow.android.json"
+
+    # Prefer a previously verified flow when the source UI is unchanged, so we
+    # skip fresh step generation. Falls back to generation on any cache miss.
+    if _reuse_cached_probe_flow(task_dir, flow_path):
+        try:
+            return flow_path, json.loads(flow_path.read_text())
+        except json.JSONDecodeError:
+            pass
 
     app, warnings = extract_android_app_config(task_dir)
     if not app:
@@ -4498,6 +4595,8 @@ def run_android_probe_flow_evaluator(task_dir: Path, iteration: int, iter_log_di
             allow_synthesize_pass=False,
             fail_next_action="retry_generator",
         )
+        if evaluation.get("nextAction") == "finish":
+            _cache_probe_flow_paths(task_dir, flow_path, summary if isinstance(summary, dict) else {})
 
     if evaluation.get("testResults"):
         record_tc_attempts(task_dir, evaluation, source="android-probe-flow")
@@ -5067,6 +5166,7 @@ def build_replan_context(task_dir: Path) -> str:
 
 def run_ai_test_planner(task_dir: Path, agent: str = "auto", mode: Literal["cli", "llm"] = "cli") -> bool:
     """Ask a coding agent to refine Brainstorm/Requirements/TestCases/Plan before Generator."""
+    record_phase_start(task_dir, "planning")
     planner_dir = task_dir / "logs" / "planner"
     ensure_dir(planner_dir)
     update_runtime_state(task_dir, status="planning", currentOwner="planner", nextAction="run_test_planner")
@@ -5159,6 +5259,7 @@ def run_ai_test_planner(task_dir: Path, agent: str = "auto", mode: Literal["cli"
         "- Reusable findings: Use model planning to refine requirements, acceptance criteria, tests, and plan; keep scripts as validation/execution scaffolding.\n"
         "- Avoid repeating: Do not let platform runners invent validation targets; update TestCases/Requirements first.\n"
     )
+    record_phase_end(task_dir, "planning")
     return True
 
 
@@ -5469,6 +5570,9 @@ def run_harness_loop(
             ensure_summary_generated(task_code, reason="pre_build_workflow_gate")
             return False
 
+        if start_warm_build(task_dir):
+            log("Warm build started in background; will wait for completion before Evaluator")
+
     while iteration < loop_limit:
         loop_derived = reconcile_task_state(task_dir, reason="run_harness_loop_iteration_start")
         loop_effective = loop_derived.get("effective") if isinstance(loop_derived, dict) else {}
@@ -5533,6 +5637,7 @@ def run_harness_loop(
 
         if not evaluator_only and not skip_generator_this_iteration:
             # ----- Generator Phase -----
+            record_phase_start(task_dir, "generator")
             update_runtime_state(task_dir,
                 status="generating",
                 iteration=iteration,
@@ -5664,12 +5769,14 @@ def run_harness_loop(
                 payload={"iteration": iteration, "exitCode": code, "mode": mode},
                 reason=f"after_generator_iter_{iteration}",
             )
+            record_phase_end(task_dir, "generator")
         elif skip_generator_this_iteration:
             log(f"Generator Phase skipped: resuming interrupted Evaluator for iteration {iteration}; existing generator.log is present")
         else:
             log(f"Generator Phase skipped: evaluator-only task ({evaluator_only_kind}) already has concrete config")
 
         # ----- Evaluator Phase -----
+        record_phase_start(task_dir, "evaluator")
         update_runtime_state(task_dir,
             status="evaluating",
             iteration=iteration,
@@ -5720,6 +5827,21 @@ def run_harness_loop(
             finalize_task_records(task_code, "evaluator_context_invalid")
             ensure_summary_generated(task_code, reason="evaluator_context_invalid")
             return False
+
+        warm_build_status = wait_for_warm_build(task_dir)
+        wait_for_ui_exploration(task_dir)
+
+        if warm_build_status.get("status") == "completed":
+            # Informational only: the actual iOS/Android build runs inside the
+            # external runner scripts, which reuse the primed disk caches
+            # (DerivedData / Gradle / Pods) automatically. This log surfaces the
+            # incremental-vs-full decision for diagnostics; it does not itself
+            # drive or alter the runner's build command.
+            incremental_possible, incremental_reason = is_incremental_build_possible(task_dir)
+            if incremental_possible:
+                log(f"Incremental build possible: {incremental_reason}")
+            else:
+                log(f"Full build required: {incremental_reason}")
 
         if mock_sequence:
             mock_result = mock_sequence[min(iteration - 1, len(mock_sequence) - 1)]
@@ -5910,11 +6032,13 @@ def run_harness_loop(
             payload={"iteration": iteration, "result": evaluation.get("result"), "nextAction": evaluation.get("nextAction")},
             reason=f"after_evaluator_iter_{iteration}",
         )
+        record_phase_end(task_dir, "evaluator")
 
         next_action = evaluation["nextAction"]
         if next_action == "finish":
             success("Validation passed. Loop finished")
             reconcile_validation_status(task_dir)
+            flush_metrics(task_dir)
             finalize_task_records(task_code, "finish")
             ensure_summary_generated(task_code, reason="finish")
             return True
@@ -6627,6 +6751,8 @@ def cmd_plan(task_code: str, agent: str = "auto"):
     ok = run_ai_test_planner(task_dir, agent=agent)
     if ok:
         success(f"Phase 2 Refiner refined task: {task_code}")
+        if start_warm_build(task_dir):
+            log("Warm build started in background; will wait for completion before Evaluator")
     else:
         warn(f"Phase 2 Refiner did not complete; deterministic scaffold remains: {task_code}")
 

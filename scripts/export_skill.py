@@ -145,7 +145,7 @@ def write_skill_md(out_dir: pathlib.Path) -> None:
     (out_dir / "SKILL.md").write_text(
         """---
 name: automind-skill
-description: "AutoMind evidence-driven harness loop for coding agents. Use when a coding task needs explicit requirements, preflight, evaluator evidence, retry/replan decisions, mobile/script verification, or reusable summaries. Defaults to high automation with keeping looping implement, verify, repair."
+description: "AutoMind evidence-driven harness loop for coding agents. Use for coding tasks across iOS, Android, Web, and server/backend when the work needs explicit requirements, preflight, evaluator evidence, retry/replan decisions, mobile/script verification, or reusable summaries. Defaults to high automation with keeping looping implement, verify, repair."
 ---
 
 # AutoMind Skill

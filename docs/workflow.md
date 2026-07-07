@@ -42,7 +42,8 @@ auto-detects either form and validates the requirement/AC continuity.
 Humans and agents edit `Brainstorm.md`, `Requirements.md`, `TestCases.md`,
 `Plan.md`, and review live control state in `automind-workflow-state.json` and runtime/resume details in `runtime-state.json`; `workflow-check` materializes
 and validates the machine projection consumed by deterministic gates and
-platform adapters.
+platform adapters. The full contract mechanics are described later in
+[§15 `workflow.json` as orchestration contract](#15-workflowjson-as-orchestration-contract).
 
 ## 1.1 Per-TestCase reflection budget
 
@@ -52,343 +53,7 @@ The total task loop is bounded by `AUTOMIND_MAX_ITERATIONS` (default `1000`). In
 
 When a TC reaches the per-TC reflection limit, AutoMind stops normal `retry_generator`/`replan` churn and asks for a human strategy decision using `askUserQuestion.category=repeated_same_failure`. The model should still judge whether to retry, repair, replan, or ask earlier; the budget is only a hard safety backstop.
 
-
-## 2.1 Workflow control state
-
-AutoMind now separates **workflow control state** from artifact contracts.
-The agent/runtime-facing control files are:
-
-```text
-.automind/tasks/<task>/automind-workflow-state.json
-.automind/tasks/<task>/automind-workflow-events.jsonl
-.automind/tasks/<task>/stages/initialization-stage-state.json
-.automind/tasks/<task>/stages/requirement-stage-state.json
-.automind/tasks/<task>/stages/verification-loop-stage-state.json
-.automind/tasks/<task>/stages/summary-stage-state.json
-```
-
-`automind-workflow-state.json` is the live control state. It answers only:
-current stage, current phase, current action, current owner, next action,
-next phase, planned next phase, iteration, state health, and the last state
-change event. It does not contain checklist items, outputs, evidence, reports,
-or human-facing display summaries.
-
-`automind-workflow-events.jsonl` is the append-only transition log. State changes
-must be recorded as events first, then applied to the active stage state and the
-workflow state. If the stage state and workflow state drift, AutoMind reconciles
-from the latest valid workflow event and continues; state drift is not an
-`ask_user` reason. When no usable event exists, reconciliation rebuilds from the
-last known good phase (`workflow_state._last_known_good_phase`, which scans
-workflow state -> runtime state -> events for the first non-`task_setup`
-canonical phase) instead of falling back to `task_setup`; falling back to
-`task_setup` would otherwise reset the iteration counter and lose loop progress.
-
-Stages map to the existing AutoMind macro docs:
-
-| stage | macro guide | phases |
-|---|---|---|
-| `initialization` | `docs/phase1-initialization.md` | `task_setup`, `context_load`, `environment_readiness` |
-| `requirement` | `docs/phase2-requirement.md` | `brainstorm`, `requirements`, `testcases`, `plan`, `pre_implementation_review` |
-| `verification_loop` | `docs/phase3-verification.md` | `delivery`, `evaluation` |
-| `summary` | `docs/phase4-summary.md` | `completion` |
-
-The `verification_loop` stage owns iteration details. In workflow control state,
-`iteration` means the active or next Generator -> Evaluator attempt being routed.
-`evaluation.json.iteration` may describe the attempt that just produced an
-Evaluator result; for a retry route, `automind-workflow-state.json.iteration`
-therefore advances to the next delivery attempt. `verification-loop-stage-state.json`
-keeps the detailed iteration object for the current delivery/evaluation loop.
-
-Skill-mode checklists remain in phase guides and the exported skill. They are
-linked through `PHASE_REGISTRY[currentPhase].checklistRefs`; checklist text is
-not copied into workflow state JSON.
-
-Phase names have one internal vocabulary and one display vocabulary. Internally
-AutoMind reasons in canonical phase names (`plan`, `completion`,
-`pre_implementation_review`, ...). Every human/CLI/skill-facing label is
-converted through the single helper `workflow_state.display_phase`, which maps
-canonical names to the legacy display words (`planning`, `terminal`,
-`human_input`, ...) via `DISPLAY_PHASE_MAP`. Do not hand-format phase labels in
-output code; when a new phase is added, update `DISPLAY_PHASE_MAP` so the display
-vocabulary stays single-sourced.
-
-## 2. `workflow.json` as orchestration contract
-
-AutoMind's main workflow is driven by `workflow.json`. Markdown remains the
-human/agent authoring surface, but every phase also has a minimum JSON sidecar.
-`workflow.json` indexes those sidecars and tells deterministic gates what each
-phase consumes, produces, and whether it can advance.
-
-Artifact model:
-
-```text
-Brainstorm.md     + brainstorm.json
-Requirements.md   + requirements.json
-Plan.md           + plan.json
-TestCases.md      + testcases.json
-Pre-impl review   + pre-implementation-review.json
-Delivery.md       + delivery.json
-Validation.md     + evaluation.json
-completion-check  + completion-report.json
-                  + workflow.json
-```
-
-`workflow.json` is derived, not hand-authored. If a phase changes, rerun
-`workflow-check` to refresh sidecars and the workflow contract.
-
-Each sidecar has:
-
-- `version`;
-- `phase`;
-- `sourceRefs`;
-- minimum structured fields for the phase output.
-
-Schemas live in `schemas/`:
-
-- `workflow.schema.json`;
-- `brainstorm.schema.json`;
-- `requirements.schema.json`;
-- `plan.schema.json`;
-- `testcases.schema.json`;
-- `pre-implementation-review.schema.json`;
-- `delivery.schema.json`;
-- `completion-report.schema.json`;
-- existing runtime schemas such as `evaluation.schema.json` and
-  `probe-flow.schema.json`.
-
-`evaluation.json` keeps its existing Evaluator-owned schema and is not
-synthesized before the Evaluator runs.
-
-### Skill-mode JSON handoff rule
-
-In CLI-owned mode, AutoMind refreshes these sidecars automatically. In Skill or
-slash-command current-session mode, the host agent must still use the same JSON
-contracts as the handoff spine:
-
-- read `workflow.json` before choosing the next action;
-- read upstream phase sidecars before editing a downstream Markdown artifact;
-- after a phase artifact changes, run `workflow-check` when available so the
-  sidecar and derived `workflow.json` are refreshed and schema-checked;
-- treat hard `workflow-check` / schema issues as blocking, not as advisory text;
-- use `evaluation.json.nextAction` and `completion-report.json` as structured
-  control signals instead of chat/prose confidence.
-
-If the full CLI is unavailable, Skill-only agents should preserve the same file
-shapes manually and record any missing schema/checker coverage as a limitation in
-`Validation.md` or the final handoff.
-
-### Skill-mode loop driver protocol
-
-Skill mode lacks an orchestrator-owned while loop, so the host agent must act as
-a lightweight loop driver:
-
-1. Start or resume with `continue`/`status`/`workflow.json` to identify the next
-   phase and any pending user answer/message.
-2. Execute exactly one phase action: refine Plan, run Generator, run Evaluator,
-   run `completion-check`, or ask the user only for an allowed blocker.
-3. After every CLI helper/check/evaluator result, refresh/read
-   `automind-workflow-state.json` as the workflow control state and
-   immediately perform the next safe action. Local signals such as
-   `evaluation.json.nextAction`, `workflow-check`, `completion-report.json`, and
-   runtime-state projection feed the resolver; they are not competing
-   macro truths.
-4. Stop only on green `completion-check`, allowed `ask_user`, max-iteration
-   escalation, explicit user pause/abort, or non-recoverable unsafe condition.
-5. If a step fails because artifacts are inconsistent, go back to the phase that
-   owns the broken artifact; do not ask the user to drive the loop manually.
-
-`workflow.json` contains only the derived contract/gate surface:
-
-- task identity and type;
-- `phaseGraph` with start/final nodes, node list, and edges;
-- `expectedNext` and `target` so deterministic gates know which contract node(s)
-  are expected next and what final result must be reached;
-- phase nodes with `guideRefs`, `artifactRefs`, `inputRefs`, `outputRefs`,
-  dependency status, `checker`, `schema`, and gate result;
-- testcase/runtime proof contract for platform adapters and completion gates.
-
-Do not use `workflow.json` as the live task status card. Current/next phase, owner, next action, planned next phase, iteration, and state health belong in `automind-workflow-state.json`. `stages/*-stage-state.json` carries stage-local control payloads. `runtime-state.json.stateSummary` is obsolete fallback only, not a second source of truth.
-
-Example phase node:
-
-```json
-{
-  "id": "testcases",
-  "cluster": "phase2-verification-execution-planning",
-  "status": "ready",
-  "guideRefs": {
-    "workflow": "docs/workflow.md",
-    "macro": "docs/phase2-requirement.md",
-    "phase": "docs/phases/testcases.md"
-  },
-  "artifactRefs": {
-    "markdown": "TestCases.md",
-    "json": "testcases.json",
-    "schema": "schemas/testcases.schema.json"
-  },
-  "inputRefs": ["Requirements.md", "requirements.json", "TestCases.md"],
-  "outputRefs": ["testcases.json"],
-  "dependencies": {
-    "inputRefs": ["Requirements.md", "requirements.json", "TestCases.md"],
-    "outputRefs": ["testcases.json"],
-    "missingInputs": [],
-    "missingOutputs": [],
-    "ready": true
-  },
-  "blockedBy": [],
-  "schema": "schemas/testcases.schema.json",
-  "checker": {
-    "name": "testcases_contract",
-    "result": "pass",
-    "issues": [],
-    "warnings": []
-  },
-  "next": ["plan"],
-  "gate": {
-    "required": true,
-    "result": "pass",
-    "issues": [],
-    "warnings": []
-  }
-}
-```
-
-### Phase hooks
-
-AutoMind may run deterministic hooks before and after phase nodes. The hook mechanism is generic: it can prepare reuse context, write phase-learning cards, run future policy checks, or attach project preflight hints. The current MVP writes `phase-reuse/<phase>.md` before key phases and `logs/phase-learnings/<phase>.json` after phases.
-
-`Reuse.md` remains as a compact task-level manifest: whole-task policy plus index pointers only. It points to relevant knowledge-index entries and `phase-reuse/<phase>.md` files; the actual phase-specific detail (matched values, successful/avoid paths, important reminders) lives in `phase-reuse/<phase>.md`, not duplicated here. Long knowledge lives in `index.jsonl + raw/**`; agents should not receive large historical dumps by default.
-
-#### Reuse acknowledgement gate (read reuse before you act)
-
-To prevent agents from verbally claiming "I considered reuse" without turning it into action, the before-phase hook for gated phases (`generator`, `evaluator`) computes a machine-checkable `runtime-state.json.reuseGate.<phase>` descriptor: `required`, matched `safePaths`/`avoidPaths`/`reminders`, a `repeatedFailure` classification (signing / device / build / repeated-same-failure), `acknowledged`, and the recorded `acknowledgement`. Entering a phase (including each retry/re-verify iteration) resets `acknowledged=false`, so reuse must be re-read every turn.
-
-The agent records the acknowledgement with `automind reuse-ack <task-code> <phase> --read --applied "<paths used>" --ignored "<paths skipped and why>"`. `workflow-check` enforces this as a hard gate: it raises an issue (failing the check) when a gated phase is about to run with `acknowledged != true` / `phaseReuseRead != true`. For a detected repeated-failure / signing / device / build category, if the loop is escalating to `ask_user` while matched `safePaths` exist and none were applied, `workflow-check` also fails — the agent must exhaust safe reuse paths (reuse signed app when business code unchanged, `devicectl install`/`launch`, avoid `idevicescreenshot`, avoid unnecessary full builds, classify the issue) or record why each was insufficient before interrupting the human. `ask_user` is reserved for the remaining genuinely-sensitive steps (login, keychain, certificate/profile change).
-
-### Document layers
-
-The documentation is intentionally layered from broad to specific:
-
-1. `docs/workflow.md` and `workflow.json` define the global workflow contract
-   and gate surface; `automind-workflow-state.json` resolves live control state; `stages/*-stage-state.json` carries stage-local control payloads; `runtime-state.json.stateSummary` is obsolete fallback only.
-2. `docs/phase1-initialization.md` through `docs/phase4-summary.md` define
-   macro phase clusters. They group related concrete nodes by AutoMind's big
-   process stages and should stay as macro guidance.
-3. `docs/phases/*.md` files define concrete phase-node guides. When entering a
-   node, the agent should read the macro guide plus that node's concrete guide.
-
-This keeps AutoMind readable from top to bottom without forcing every phase rule
-into the global workflow document.
-
-### Progress and blockers
-
-`automind-workflow-state.json` is the compact control state for long-running
-automation. The workflow control state should answer:
-
-- what concrete phase is current (`currentPhase`);
-- who owns the work (`currentOwner`, for example planner/generator/evaluator/human);
-- which phase/action/owner comes next (`nextPhase`, `nextAction`, `nextOwner`);
-- why that route was chosen (`reason`, `basis`);
-- what checklist/blocking work remains before handoff.
-
-`workflow.json` stays as the derived contract/gate surface. It should not carry
-root-level `currentPhase`, `current`, `overallStatus`, `progress`, `blockedBy`,
-`pendingUserAction`, or runtime `execution` snapshots.
-
-### Pre-implementation review node
-
-`pre_implementation_review` sits between `plan` and `delivery`. It is the
-explicit implementation gate and may output `auto_proceed`, `ask_user`, or
-`replan`. There is no separate `ask_user` phase: `ask_user` is an action emitted
-by this node or by later verification nodes when a human/system decision is
-needed.
-
-### State/action quick reference
-
-AutoMind uses action values in different control layers. Keep them separate:
-
-- Pre-implementation review decisions: `auto_proceed`, `ask_user`, `replan`.
-- Evaluation/loop `nextAction` values: `finish`, `retry_generator`, `replan`,
-  `ask_user`, `stop`, `stop_blocked`, `pause_for_external`.
-- Runtime-state scheduler actions include internal resume targets such as
-  `run_test_planner`, `run_generator`, `run_evaluator`, and `generate_summary`.
-
-`automind-workflow-state.json` and `stages/*-stage-state.json` should be read first for workflow routing; fall back to `runtime-state.json.stateSummary` only for older tasks.
-`runtime-state.json` should be read as runtime
-projection fields (`status + currentOwner + nextAction`) only:
-`status` describes the task condition, `currentOwner` says who owns the next
-work, and `nextAction` is the route action. For the full enum table and common
-route mappings, see [`references/state-actions.md`](references/state-actions.md).
-
-`ask_user` is therefore an action, not a phase node. Ask-user routing is recorded
-in `automind-workflow-state.json` and task-local answer artifacts;
-`runtime-state.json.stateSummary` is obsolete fallback only. Do not encode
-ask-user routing as root-level `workflow.json` status fields.
-
-### Gate policy for the workflow contract
-
-`workflow-check` refreshes and validates:
-
-1. Phase sidecars for Brainstorm, Requirements, Plan, and TestCases.
-2. `workflow.json` phase nodes and testcase/runtime policy.
-3. Existing cross-artifact continuity: R/AC/TC/Plan/evaluation.
-4. Pre-implementation hard gates.
-
-Generator must not run while a required pre-generator phase gate fails.
-
-#### Skill/command mode gate relationship
-
-`workflow.md` remains the canonical workflow policy: phases, ownership, required artifacts, and route-back rules are defined here. `phase-gate` is not a replacement for the workflow; it is a lightweight script gate for skill/slash-command mode, where the host coding agent drives the loop and needs a deterministic handoff check.
-
-Use `phase-gate` at phase handoff boundaries:
-
-```bash
-<AUTOMIND_CLI> phase-gate <task-code> auto
-<AUTOMIND_CLI> phase-gate <task-code> build
-<AUTOMIND_CLI> phase-gate <task-code> verify
-<AUTOMIND_CLI> phase-gate <task-code> finish
-```
-
-`phase-gate` refreshes/seeds `automind-workflow-state.json`, reads `workflow.json` / `runtime-state.json` / evaluator and completion outputs as local signals, and returns a pass/fail JSON handoff decision. When the handoff is about to enter `delivery` or `evaluation`, it also performs a conservative deterministic refresh for missing/stale `phase-reuse/generator.md` or `phase-reuse/evaluator.md` and exposes the result in `phaseReuseRefresh`. It does not reset fresh acknowledged reuse. If `phase-gate` fails, follow its `requiredCommand` and keep using this workflow's owning phase to repair the blocked artifact.
-
-CLI/TUI-owned loops call internal before/after phase hooks automatically. In skill/command mode, `phase-gate` covers the key execution-phase reuse refresh, and the host coding agent should use the returned checklist: copy `checklist[]` or `checkboxMarkdown[]` into its native TODO/checkbox plan, complete items one by one, then rerun `phase-gate` for the next handoff. This keeps phase discipline visible without adding a separate skill-only hook command. The detailed checklist guidance lives in [`references/skill-command-driver-checklist.md`](references/skill-command-driver-checklist.md).
-
-Checklist items are ordered and deliberately simple. They should cover the critical phase flow — read inputs/reuse, do the phase work, write/update required artifacts and sidecars, capture evidence/logs when relevant, and rerun the gate — without becoming a second state machine.
-
-`completion-check` remains the final finish gate. It uses the same testcase and
-runtime policy carried by `workflow.json`/`testcases.json` and checks required
-TCs, AC coverage, evidence paths, and runtime proof.
-
-### Extension rule
-
-New phases or platform adapters should add a small sidecar schema first, then add
-a phase node to `workflow.json`. Do not expand `workflow.json` into a giant copy
-of every artifact; keep it as the orchestration index and policy projection.
-
-### Artifact redundancy policy
-
-Markdown files are the authoring surface: they carry the full human/agent
-reasoning, rationale, and reviewable contract. JSON sidecars are compact machine
-contracts: ids, refs, gates, status, and schema-friendly fields. They must not
-duplicate long Markdown prose; use `sourceRef`, path, section, hash, and compact
-summaries instead.
-
-`workflow.json` is the phase graph / refs / gates / runtime-test policy
-projection, not a copy of every phase artifact and not a live status card.
-`automind-workflow-state.json` is the workflow control truth for current/next
-phase decisions and ask-user routing. Checklist text remains in phase guides/skill TODOs. The rest of
-`runtime-state.json` is the mutable runtime projection/resume cache.
-`events.jsonl`, `trace-spans.jsonl`, and raw logs are cold audit/debug artifacts
-and should not enter default context packs.
-
-`summary.md` and `Report.html` are final handoff artifacts by default. They must
-not be generated or refreshed during normal Generator/Evaluator iterations, must
-not drive routing, and must not reopen a finished task. Final handoff should
-tell the user in natural language that the task is complete, which reports were
-generated, to open `Report.html` first, and which runtime proof / log / ledger
-artifacts matter most.
-
-## 3. Phase chain and route-back contract
+## 2. Phase chain and route-back contract
 
 AutoMind is a repair loop, not a one-way pipeline:
 
@@ -419,7 +84,7 @@ may override a false finish when required TC/AC/evidence coverage is not proven.
 | Completion | AutoMind | `evaluation.json`, TestCases/Requirements, evidence | `completion-report.json`, `VerificationLedger.json` | pass -> `finished/finish`; fail -> route by gaps/evaluation |
 | Finish | AutoMind / current agent | terminal or durable paused state | `summary.md`, reuse memory, `record-check`, `Report.html` | final handoff only |
 
-## 4. Hard gates
+## 3. Hard gates
 
 AutoMind has three hard gates:
 
@@ -449,7 +114,7 @@ pass rows need concrete `evidence[]`, `observedSignals[]` when meaningful, and a
 positive `evidenceAssessment` with `hardMetrics[].evidence` or `machineAnchor`
 pointing at real artifacts.
 
-### 4.1 Skill-mode continue-until-done protocol
+### 3.1 Skill-mode continue-until-done protocol
 
 Skill / `/automind` slash-command mode runs without an external orchestrator
 loop, so the host agent itself must keep the harness moving. The protocol is:
@@ -476,8 +141,7 @@ loop, so the host agent itself must keep the harness moving. The protocol is:
    `completion-check` in the same turn; otherwise treat the loop as still
    running.
 
-
-## 5. Mandatory startup read order
+## 4. Mandatory startup read order
 
 At the start of every AutoMind task, read and apply:
 
@@ -505,7 +169,7 @@ If context is constrained, read at minimum items 1 and 2's Phase 2/Phase 3 docs
 plus the command-script catalog, and record which references must still be
 consulted before choosing commands or verification strategy.
 
-## 6. Workspace and runtime rule
+## 5. Workspace and runtime rule
 
 AutoMind runtime and user workspace are separate.
 
@@ -541,7 +205,7 @@ During Plan/Verify, dependency setup is split by ownership:
   private registry credentials, and privileged services require `ask_user`
   before installation or mutation.
 
-## 7. Standard task files
+## 6. Standard task files
 
 Each non-trivial task should use:
 
@@ -569,7 +233,7 @@ logs/iter-N/
 Single-stage helper commands may use a smaller set, but must still write enough
 records for status, evidence, and resume.
 
-## 8. Plan phase rules
+## 7. Plan phase rules
 
 Phase 2 is model-refined planning. The Planner must:
 
@@ -650,7 +314,7 @@ information; it cannot satisfy the clean-build gate.
 Detailed Plan rules are in `docs/phase2-requirement.md`. Testcase examples are
 in `docs/references/test-design-guide.md`.
 
-## 9. Build phase rules
+## 8. Build phase rules
 
 Generator owns product/runtime implementation and repair. It must:
 
@@ -663,7 +327,7 @@ Generator owns product/runtime implementation and repair. It must:
 Generator does not own final verification and must not claim finish without
 Evaluator evidence and a passing completion gate.
 
-### 9.1 Generator repair loop
+### 8.1 Generator repair loop
 
 When Evaluator/verifier reports `evaluation.json.nextAction=retry_generator`,
 Generator becomes the next owner. Generator must read `Validation.md`,
@@ -693,7 +357,7 @@ Evaluator feedback remain connected. The session id is recorded under
 `runtime-state.json.agentSessions.primary` when available. This reuse never
 applies to Evaluator.
 
-## 10. Verify phase rules
+## 9. Verify phase rules
 
 Evaluator owns verification, evidence, failure classification, `Validation.md`,
 `evaluation.json`, and the Plan Verification Checklist (`TC-*` rows).
@@ -721,7 +385,7 @@ Detailed verification rules are in `docs/phase3-verification.md`; platform,
 visual, external sink, and unblock guidance is in
 `docs/references/verification-flow.md`.
 
-## 11. Verification unblock rule
+## 10. Verification unblock rule
 
 If verification is blocked by unrelated build/test/workspace issues, AutoMind may
 create minimal reversible verification-unblock changes only after checkpointing
@@ -733,7 +397,7 @@ in `Delivery.md`, `Validation.md`, and
 `evaluation.json.verificationUnblockChanges`, then restored or explicitly
 promoted before finish. Active temporary unblock changes block completion.
 
-## 12. Routing table
+## 11. Routing table
 
 | Condition | Route |
 |---|---|
@@ -765,7 +429,7 @@ stop). New evaluator output should prefer the explicit `stop_blocked` and
 right state (`status=failed` for hard stops, `status=human_input_pending` for
 external pauses) without guessing.
 
-## 13. Progress and resume
+## 12. Progress and resume
 
 Use files, not chat memory, as the progress ledger:
 
@@ -781,7 +445,7 @@ Interrupted tasks can resume from `runtime-state.json`, `evaluation.json`,
 Evaluator after Generator output exists, resume Evaluator without rerunning
 Generator unless new evidence requires repair.
 
-## 14. Finish rules
+## 13. Finish rules
 
 Before claiming Finish:
 
@@ -809,7 +473,318 @@ Surface the generated report paths to the user: `Delivery.md`, `Validation.md`,
 `evaluation.json`, `VerificationLedger.json`, `summary.md`, `runtime-state.json`,
 and latest `logs/iter-N/`.
 
-## 15. Reference index
+## 14. Workflow control state
+
+AutoMind separates **workflow control state** from artifact contracts.
+The agent/runtime-facing control files are:
+
+```text
+.automind/tasks/<task>/automind-workflow-state.json
+.automind/tasks/<task>/automind-workflow-events.jsonl
+.automind/tasks/<task>/stages/initialization-stage-state.json
+.automind/tasks/<task>/stages/requirement-stage-state.json
+.automind/tasks/<task>/stages/verification-loop-stage-state.json
+.automind/tasks/<task>/stages/summary-stage-state.json
+```
+
+`automind-workflow-state.json` is the live control state. It answers only:
+current stage, current phase, current action, current owner, next action,
+next phase, planned next phase, iteration, state health, and the last state
+change event. It does not contain checklist items, outputs, evidence, reports,
+or human-facing display summaries.
+
+`automind-workflow-events.jsonl` is the append-only transition log. State changes
+must be recorded as events first, then applied to the active stage state and the
+workflow state. If the stage state and workflow state drift, AutoMind reconciles
+from the latest valid workflow event and continues; state drift is not an
+`ask_user` reason. When no usable event exists, reconciliation rebuilds from the
+last known good phase (`workflow_state._last_known_good_phase`, which scans
+workflow state -> runtime state -> events for the first non-`task_setup`
+canonical phase) instead of falling back to `task_setup`; falling back to
+`task_setup` would otherwise reset the iteration counter and lose loop progress.
+
+Stages map to the existing AutoMind macro docs:
+
+| stage | macro guide | phases |
+|---|---|---|
+| `initialization` | `docs/phase1-initialization.md` | `task_setup`, `context_load`, `environment_readiness` |
+| `requirement` | `docs/phase2-requirement.md` | `brainstorm`, `requirements`, `testcases`, `plan`, `pre_implementation_review` |
+| `verification_loop` | `docs/phase3-verification.md` | `delivery`, `evaluation` |
+| `summary` | `docs/phase4-summary.md` | `completion` |
+
+The `verification_loop` stage owns iteration details. In workflow control state,
+`iteration` means the active or next Generator -> Evaluator attempt being routed.
+`evaluation.json.iteration` may describe the attempt that just produced an
+Evaluator result; for a retry route, `automind-workflow-state.json.iteration`
+therefore advances to the next delivery attempt. `verification-loop-stage-state.json`
+keeps the detailed iteration object for the current delivery/evaluation loop.
+
+Skill-mode checklists remain in phase guides and the exported skill. They are
+linked through `PHASE_REGISTRY[currentPhase].checklistRefs`; checklist text is
+not copied into workflow state JSON.
+
+Phase names have one internal vocabulary and one display vocabulary. Internally
+AutoMind reasons in canonical phase names (`plan`, `completion`,
+`pre_implementation_review`, ...). Every human/CLI/skill-facing label is
+converted through the single helper `workflow_state.display_phase`, which maps
+canonical names to the legacy display words (`planning`, `terminal`,
+`human_input`, ...) via `DISPLAY_PHASE_MAP`. Do not hand-format phase labels in
+output code; when a new phase is added, update `DISPLAY_PHASE_MAP` so the display
+vocabulary stays single-sourced.
+
+### 14.1 Progress and blockers
+
+`automind-workflow-state.json` is the compact control state for long-running
+automation. The workflow control state should answer:
+
+- what concrete phase is current (`currentPhase`);
+- who owns the work (`currentOwner`, for example planner/generator/evaluator/human);
+- which phase/action/owner comes next (`nextPhase`, `nextAction`, `nextOwner`);
+- why that route was chosen (`reason`, `basis`);
+- what checklist/blocking work remains before handoff.
+
+`workflow.json` stays as the derived contract/gate surface. It should not carry
+root-level `currentPhase`, `current`, `overallStatus`, `progress`, `blockedBy`,
+`pendingUserAction`, or runtime `execution` snapshots.
+
+### 14.2 Pre-implementation review node
+
+`pre_implementation_review` sits between `plan` and `delivery`. It is the
+explicit implementation gate and may output `auto_proceed`, `ask_user`, or
+`replan`. There is no separate `ask_user` phase: `ask_user` is an action emitted
+by this node or by later verification nodes when a human/system decision is
+needed.
+
+### 14.3 State/action quick reference
+
+AutoMind uses action values in different control layers. Keep them separate:
+
+- Pre-implementation review decisions: `auto_proceed`, `ask_user`, `replan`.
+- Evaluation/loop `nextAction` values: `finish`, `retry_generator`, `replan`,
+  `ask_user`, `stop`, `stop_blocked`, `pause_for_external`.
+- Runtime-state scheduler actions include internal resume targets such as
+  `run_test_planner`, `run_generator`, `run_evaluator`, and `generate_summary`.
+
+Read `automind-workflow-state.json` and `stages/*-stage-state.json` first for
+workflow routing; `runtime-state.json.stateSummary` is obsolete fallback only.
+`ask_user` is an action, not a phase node. For the full enum table, owner
+boundaries, and common route mappings, see
+[`references/state-actions.md`](references/state-actions.md).
+
+## 15. `workflow.json` as orchestration contract
+
+AutoMind's main workflow is driven by `workflow.json`. Markdown remains the
+human/agent authoring surface, but every phase also has a minimum JSON sidecar.
+`workflow.json` indexes those sidecars and tells deterministic gates what each
+phase consumes, produces, and whether it can advance.
+
+Artifact model:
+
+```text
+Brainstorm.md     + brainstorm.json
+Requirements.md   + requirements.json
+Plan.md           + plan.json
+TestCases.md      + testcases.json
+Pre-impl review   + pre-implementation-review.json
+Delivery.md       + delivery.json
+Validation.md     + evaluation.json
+completion-check  + completion-report.json
+                  + workflow.json
+```
+
+`workflow.json` is derived, not hand-authored. If a phase changes, rerun
+`workflow-check` to refresh sidecars and the workflow contract. Each sidecar
+carries `version`, `phase`, `sourceRefs`, and the minimum structured fields for
+that phase output. Schemas live in `schemas/` (one per sidecar plus runtime
+schemas such as `evaluation.schema.json` and `probe-flow.schema.json`).
+`evaluation.json` keeps its existing Evaluator-owned schema and is not
+synthesized before the Evaluator runs.
+
+### 15.1 Skill-mode JSON handoff rule
+
+In CLI-owned mode, AutoMind refreshes these sidecars automatically. In Skill or
+slash-command current-session mode, the host agent must still use the same JSON
+contracts as the handoff spine:
+
+- read `workflow.json` before choosing the next action;
+- read upstream phase sidecars before editing a downstream Markdown artifact;
+- after a phase artifact changes, run `workflow-check` when available so the
+  sidecar and derived `workflow.json` are refreshed and schema-checked;
+- treat hard `workflow-check` / schema issues as blocking, not as advisory text;
+- use `evaluation.json.nextAction` and `completion-report.json` as structured
+  control signals instead of chat/prose confidence.
+
+If the full CLI is unavailable, Skill-only agents should preserve the same file
+shapes manually and record any missing schema/checker coverage as a limitation in
+`Validation.md` or the final handoff.
+
+### 15.2 Skill-mode loop driver protocol
+
+Skill mode lacks an orchestrator-owned while loop, so the host agent must act as
+a lightweight loop driver:
+
+1. Start or resume with `continue`/`status`/`workflow.json` to identify the next
+   phase and any pending user answer/message.
+2. Execute exactly one phase action: refine Plan, run Generator, run Evaluator,
+   run `completion-check`, or ask the user only for an allowed blocker.
+3. After every CLI helper/check/evaluator result, refresh/read
+   `automind-workflow-state.json` as the workflow control state and
+   immediately perform the next safe action. Local signals such as
+   `evaluation.json.nextAction`, `workflow-check`, `completion-report.json`, and
+   runtime-state projection feed the resolver; they are not competing
+   macro truths.
+4. Stop only on green `completion-check`, allowed `ask_user`, max-iteration
+   escalation, explicit user pause/abort, or non-recoverable unsafe condition.
+5. If a step fails because artifacts are inconsistent, go back to the phase that
+   owns the broken artifact; do not ask the user to drive the loop manually.
+
+`workflow.json` contains only the derived contract/gate surface:
+
+- task identity and type;
+- `phaseGraph` with start/final nodes, node list, and edges;
+- `expectedNext` and `target` so deterministic gates know which contract node(s)
+  are expected next and what final result must be reached;
+- phase nodes with `guideRefs`, `artifactRefs`, `inputRefs`, `outputRefs`,
+  dependency status, `checker`, `schema`, and gate result;
+- testcase/runtime proof contract for platform adapters and completion gates.
+
+Do not use `workflow.json` as the live task status card. Current/next phase, owner, next action, planned next phase, iteration, and state health belong in `automind-workflow-state.json`. `stages/*-stage-state.json` carries stage-local control payloads. `runtime-state.json.stateSummary` is obsolete fallback only, not a second source of truth.
+
+Example phase node:
+
+```json
+{
+  "id": "testcases",
+  "cluster": "phase2-verification-execution-planning",
+  "status": "ready",
+  "guideRefs": {
+    "workflow": "docs/workflow.md",
+    "macro": "docs/phase2-requirement.md",
+    "phase": "docs/phases/testcases.md"
+  },
+  "artifactRefs": {
+    "markdown": "TestCases.md",
+    "json": "testcases.json",
+    "schema": "schemas/testcases.schema.json"
+  },
+  "inputRefs": ["Requirements.md", "requirements.json", "TestCases.md"],
+  "outputRefs": ["testcases.json"],
+  "dependencies": {
+    "inputRefs": ["Requirements.md", "requirements.json", "TestCases.md"],
+    "outputRefs": ["testcases.json"],
+    "missingInputs": [],
+    "missingOutputs": [],
+    "ready": true
+  },
+  "blockedBy": [],
+  "schema": "schemas/testcases.schema.json",
+  "checker": {
+    "name": "testcases_contract",
+    "result": "pass",
+    "issues": [],
+    "warnings": []
+  },
+  "next": ["plan"],
+  "gate": {
+    "required": true,
+    "result": "pass",
+    "issues": [],
+    "warnings": []
+  }
+}
+```
+
+### 15.3 Phase hooks
+
+AutoMind may run deterministic hooks before and after phase nodes. The hook mechanism is generic: it can prepare reuse context, write phase-learning cards, run future policy checks, or attach project preflight hints. The current MVP writes `phase-reuse/<phase>.md` before key phases and `logs/phase-learnings/<phase>.json` after phases.
+
+`Reuse.md` remains as a compact task-level manifest: whole-task policy plus index pointers only. It points to relevant knowledge-index entries and `phase-reuse/<phase>.md` files; the actual phase-specific detail (matched values, successful/avoid paths, important reminders) lives in `phase-reuse/<phase>.md`, not duplicated here. Long knowledge lives in `index.jsonl + raw/**`; agents should not receive large historical dumps by default.
+
+#### Reuse acknowledgement gate (read reuse before you act)
+
+To prevent agents from verbally claiming "I considered reuse" without turning it into action, the before-phase hook for gated phases (`generator`, `evaluator`) computes a machine-checkable `runtime-state.json.reuseGate.<phase>` descriptor: `required`, matched `safePaths`/`avoidPaths`/`reminders`, a `repeatedFailure` classification (signing / device / build / repeated-same-failure), `acknowledged`, and the recorded `acknowledgement`. Entering a phase (including each retry/re-verify iteration) resets `acknowledged=false`, so reuse must be re-read every turn.
+
+The agent records the acknowledgement with `automind reuse-ack <task-code> <phase> --read --applied "<paths used>" --ignored "<paths skipped and why>"`. `workflow-check` enforces this as a hard gate: it raises an issue (failing the check) when a gated phase is about to run with `acknowledged != true` / `phaseReuseRead != true`. For a detected repeated-failure / signing / device / build category, if the loop is escalating to `ask_user` while matched `safePaths` exist and none were applied, `workflow-check` also fails — the agent must exhaust safe reuse paths (reuse signed app when business code unchanged, `devicectl install`/`launch`, avoid `idevicescreenshot`, avoid unnecessary full builds, classify the issue) or record why each was insufficient before interrupting the human. `ask_user` is reserved for the remaining genuinely-sensitive steps (login, keychain, certificate/profile change).
+
+### 15.4 Document layers
+
+The documentation is intentionally layered from broad to specific:
+
+1. `docs/workflow.md` and `workflow.json` define the global workflow contract
+   and gate surface; `automind-workflow-state.json` resolves live control state; `stages/*-stage-state.json` carries stage-local control payloads; `runtime-state.json.stateSummary` is obsolete fallback only.
+2. `docs/phase1-initialization.md` through `docs/phase4-summary.md` define
+   macro phase clusters. They group related concrete nodes by AutoMind's big
+   process stages and should stay as macro guidance.
+3. `docs/phases/*.md` files define concrete phase-node guides. When entering a
+   node, the agent should read the macro guide plus that node's concrete guide.
+
+This keeps AutoMind readable from top to bottom without forcing every phase rule
+into the global workflow document.
+
+### 15.5 Gate policy for the workflow contract
+
+`workflow-check` refreshes and validates:
+
+1. Phase sidecars for Brainstorm, Requirements, Plan, and TestCases.
+2. `workflow.json` phase nodes and testcase/runtime policy.
+3. Existing cross-artifact continuity: R/AC/TC/Plan/evaluation.
+4. Pre-implementation hard gates.
+
+Generator must not run while a required pre-generator phase gate fails.
+
+#### Skill/command mode gate relationship
+
+`workflow.md` remains the canonical workflow policy: phases, ownership, required artifacts, and route-back rules are defined here. `phase-gate` is not a replacement for the workflow; it is a lightweight script gate for skill/slash-command mode, where the host coding agent drives the loop and needs a deterministic handoff check.
+
+Use `phase-gate` at phase handoff boundaries:
+
+```bash
+<AUTOMIND_CLI> phase-gate <task-code> auto
+<AUTOMIND_CLI> phase-gate <task-code> build
+<AUTOMIND_CLI> phase-gate <task-code> verify
+<AUTOMIND_CLI> phase-gate <task-code> finish
+```
+
+`phase-gate` refreshes/seeds `automind-workflow-state.json`, reads `workflow.json` / `runtime-state.json` / evaluator and completion outputs as local signals, and returns a pass/fail JSON handoff decision. When the handoff is about to enter `delivery` or `evaluation`, it also performs a conservative deterministic refresh for missing/stale `phase-reuse/generator.md` or `phase-reuse/evaluator.md` and exposes the result in `phaseReuseRefresh`. It does not reset fresh acknowledged reuse. If `phase-gate` fails, follow its `requiredCommand` and keep using this workflow's owning phase to repair the blocked artifact.
+
+CLI/TUI-owned loops call internal before/after phase hooks automatically. In skill/command mode, `phase-gate` covers the key execution-phase reuse refresh, and the host coding agent should use the returned checklist: copy `checklist[]` or `checkboxMarkdown[]` into its native TODO/checkbox plan, complete items one by one, then rerun `phase-gate` for the next handoff. This keeps phase discipline visible without adding a separate skill-only hook command. The detailed checklist guidance lives in [`references/skill-command-driver-checklist.md`](references/skill-command-driver-checklist.md).
+
+Checklist items are ordered and deliberately simple. They should cover the critical phase flow — read inputs/reuse, do the phase work, write/update required artifacts and sidecars, capture evidence/logs when relevant, and rerun the gate — without becoming a second state machine.
+
+`completion-check` remains the final finish gate. It uses the same testcase and
+runtime policy carried by `workflow.json`/`testcases.json` and checks required
+TCs, AC coverage, evidence paths, and runtime proof.
+
+### 15.6 Extension rule
+
+New phases or platform adapters should add a small sidecar schema first, then add
+a phase node to `workflow.json`. Do not expand `workflow.json` into a giant copy
+of every artifact; keep it as the orchestration index and policy projection.
+
+### 15.7 Artifact redundancy policy
+
+Markdown files are the authoring surface: they carry the full human/agent
+reasoning, rationale, and reviewable contract. JSON sidecars are compact machine
+contracts: ids, refs, gates, status, and schema-friendly fields. They must not
+duplicate long Markdown prose; use `sourceRef`, path, section, hash, and compact
+summaries instead.
+
+`workflow.json` is the phase graph / refs / gates / runtime-test policy
+projection, not a copy of every phase artifact and not a live status card.
+`automind-workflow-state.json` is the workflow control truth for current/next
+phase decisions and ask-user routing. Checklist text remains in phase guides/skill TODOs. The rest of
+`runtime-state.json` is the mutable runtime projection/resume cache.
+`events.jsonl`, `trace-spans.jsonl`, and raw logs are cold audit/debug artifacts
+and should not enter default context packs.
+
+`summary.md` and `Report.html` are final handoff artifacts by default. They must
+not be generated or refreshed during normal Generator/Evaluator iterations, must
+not drive routing, and must not reopen a finished task. Final handoff should
+tell the user in natural language that the task is complete, which reports were
+generated, to open `Report.html` first, and which runtime proof / log / ledger
+artifacts matter most.
+
+## 16. Reference index
 
 | Need | Read |
 |---|---|
@@ -822,11 +797,11 @@ and latest `logs/iter-N/`.
 | Command/script selection | `references/command-script-catalog.md` |
 | Dependency and preflight checks | `references/dependency-check.md` |
 | Probe-flow generation | `references/probe-flow-generation.md` |
+| State/action enums and route mappings | `references/state-actions.md` |
 | Agent runtime / detached adapters | `agent-adapters.md` |
 | Summary/reuse | `phase4-summary.md` |
 
-
-## 16. TUI, session, trace, process eval, and learning references
+## 17. TUI, session, trace, process eval, and learning references
 
 The canonical workflow above stays intentionally compact. The interactive and
 observability layers share the same task artifacts and are detailed in
@@ -844,7 +819,6 @@ Skill mode should still run automatically after pre-implementation review is
 resolved. `automind continue [task-code]` is a recovery/checkpoint instruction
 for host agents, not a command the human should manually trigger after every
 step.
-
 
 ## Human-readable HTML report
 

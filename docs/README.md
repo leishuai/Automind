@@ -6,34 +6,18 @@ AutoMind is an automated mobile and general-project development assistant for co
 
 ## Canonical flow at a glance
 
-```text
-User request
-  -> Brainstorm.md
-  -> Requirements.md
+The canonical loop (`User request -> Brainstorm -> Requirements -> TestCases -> Plan -> workflow.json -> workflow-check -> Generator -> Evaluator -> completion-check -> Report/summary/reuse`) is defined and diagrammed in [`workflow.md`](workflow.md); use it as the default skill/CLI mental model rather than repeating it here.
 
-  -> TestCases.md
-  -> Plan.md
-  -> workflow.json
-  -> workflow-check
-  -> Generator
-  -> Delivery.md
-  -> Evaluator
-  -> Validation.md + evaluation.json
-  -> completion-check
-  -> Report.html + natural-language handoff + summary/reuse
-```
-
-This canonical flow is defined in [`workflow.md`](workflow.md). Use it as the default skill/CLI mental model. New tasks use single-file `Requirements.md` (Rxx with inline AC-xxx); new tasks must use `Requirements.md` only. For UI/runtime tasks, discovery evidence helps the model find a path, but required TC pass requires proof actions plus satisfied postChecks/evidence. At completion, `Report.html` is the primary human review surface: `Test Results` should show a concise per-TC `Key Evidence` summary with screenshots, machine anchors/hardMetrics, and key proof files, while the final response tells the user what was generated and what to inspect first.
+A few reminders that most affect readers of this index: new tasks use single-file `Requirements.md` (Rxx with inline AC-xxx) only. For UI/runtime tasks, discovery evidence helps the model find a path, but required TC pass requires proof actions plus satisfied postChecks/evidence. At completion, `Report.html` is the primary human review surface: `Test Results` should show a concise per-TC `Key Evidence` summary with screenshots, machine anchors/hardMetrics, and key proof files, while the final response tells the user what was generated and what to inspect first.
 
 ---
 
 ## Documentation map
 
-Mandatory startup read order for agents:
-
-Before an AutoMind task starts planning, coding, or validating, agents must read
-and apply the active instructions in this order. This is not a reference-only
-list.
+This is the full index of AutoMind docs and what each one owns. The authoritative
+*mandatory startup read order* lives in the exported `SKILL.md` and in
+[`workflow.md`](workflow.md) §4; this map is the on-demand lookup for the complete
+document set, so agents can find the right deeper doc when a phase needs it.
 
 1. [`workflow.md`](workflow.md) is the main entry point. It explains the AutoMind file protocol, loop control, functional-first verification, quality-check policy, and record discipline.
 2. [`references/state-actions.md`](references/state-actions.md) is the quick lookup for `automind-workflow-state.json`, `runtime-state.json` fields, route actions, Evaluator-to-Generator repair routing, completion authority, and iteration start/end contracts.
